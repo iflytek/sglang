@@ -3,6 +3,8 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass
+from sglang.srt.utils import get_local_ip_by_remote
+from sglang.srt.disaggregation.ib_devices import find_best_roce_for_gpu
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +15,24 @@ class MooncakeTransferEngineConfig:
     metadata_server: str
     protocol: str
     device_name: str
+
+    @staticmethod
+    def load_auto(gpu_id) -> "MooncakeTransferEngineConfig":
+        """Load config from a file specified in the environment variable."""
+        metadata_server = os.getenv("MOONCAKE_METADATA_SERVER", None)
+        if metadata_server is None:
+            raise ValueError(
+                "The environment variable 'MOONCAKE_METADATA_SERVER' is not set."
+            )
+        local_hostname = os.getenv("MOONCAKE_LOCAL_HOSTNAME", default=get_local_ip_by_remote())
+        protocol = os.getenv("MOONCAKE_PROTOCOL", default="rdma")
+        device_name = os.getenv("MOONCAKE_RDMA_DEVICE_NAME", default=find_best_roce_for_gpu(gpu_id))
+        return MooncakeTransferEngineConfig(
+            local_hostname=local_hostname,
+            metadata_server=metadata_server,
+            protocol=protocol,
+            device_name=device_name,
+        )
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeTransferEngineConfig":
@@ -39,7 +59,7 @@ class MooncakeTransferEngineConfig:
 
 class MooncakeTransferEngine:
 
-    def __init__(self):
+    def __init__(self, gpu_id=0):
         try:
             from mooncake.engine import TransferEngine
         except ImportError as e:
@@ -52,16 +72,14 @@ class MooncakeTransferEngine:
         self.engine = TransferEngine()
 
         try:
-            self.config = MooncakeTransferEngineConfig.load_from_env()
-            logger.info("Mooncake Configuration loaded successfully.")
+            self.config = MooncakeTransferEngineConfig.load_auto(gpu_id)
+            logger.info("Mooncake Configuration loaded successfully.  {}".format(self.config))
         except ValueError as e:
             logger.error(e)
             raise
         except Exception as exc:
             logger.error("An error occurred while loading the configuration: %s", exc)
             raise
-
-        self.config = MooncakeTransferEngineConfig.load_from_env()
 
         session_suffix = "_" + str(uuid.uuid4())
         self.session_id = self.config.local_hostname + session_suffix

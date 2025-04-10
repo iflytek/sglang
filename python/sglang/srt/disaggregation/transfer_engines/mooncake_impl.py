@@ -12,7 +12,7 @@ import numpy.typing as npt
 import zmq
 from aiohttp import web
 
-from sglang.srt.disaggregation.transfer_engine.mooncake import MooncakeTransferEngine
+from sglang.srt.disaggregation.transfer_engines.mooncake import MooncakeTransferEngine
 from sglang.srt.disaggregation.utils import DisaggregationMode
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,7 @@ class KVArgs:
     aux_data_lens: list[int]
     aux_item_lens: list[int]
     ib_device: str
+    gpu_id: int
 
 
 class KVPoll:
@@ -74,7 +75,7 @@ KVRECEIVER_POLLING_PORT = 27788
 class KVManager:
     # TODO: make it general and support multiple transfer backend before merging
     def __init__(self, args: KVArgs, disaggregation_mode: DisaggregationMode):
-        self.engine = MooncakeTransferEngine()
+        self.engine = MooncakeTransferEngine(args.gpu_id)
         self.kv_args = args
         self.disaggregation_mode = disaggregation_mode
         self.request_pool: RequestPoolType = {}
