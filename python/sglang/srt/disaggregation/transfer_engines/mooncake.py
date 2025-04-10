@@ -26,7 +26,8 @@ class MooncakeTransferEngineConfig:
             )
         local_hostname = os.getenv("MOONCAKE_LOCAL_HOSTNAME", default=get_local_ip_by_remote())
         protocol = os.getenv("MOONCAKE_PROTOCOL", default="rdma")
-        device_name = os.getenv("MOONCAKE_RDMA_DEVICE_NAME", default=find_best_roce_for_gpu(gpu_id))
+        default_ib_device, _ = find_best_roce_for_gpu(gpu_id)
+        device_name = os.getenv("MOONCAKE_RDMA_DEVICE_NAME", default=default_ib_device)
         return MooncakeTransferEngineConfig(
             local_hostname=local_hostname,
             metadata_server=metadata_server,
