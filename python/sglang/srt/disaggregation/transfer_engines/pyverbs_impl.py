@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 from sglang.srt.utils import get_open_port, get_local_ip_by_remote
 from sglang.srt.disaggregation.group_indics import groups_by_continuity_numpy
+from sglang.srt.disaggregation.utils import DisaggregationMode
 
 # Registry
 registry = {}
@@ -318,7 +319,8 @@ class KVArgs:
 
 
 class KVManager:
-    def __init__(self, args: KVArgs, bootstrap_server: KVBootstrapServer = None):
+    def __init__(self, args: KVArgs, disaggregation_mode: DisaggregationMode):
+
         self.args = args
         self.engine_rank = args.engine_rank
         self.kv_data_ptrs = args.kv_data_ptrs
@@ -329,7 +331,6 @@ class KVManager:
         self.aux_item_lens = args.aux_item_lens
 
         self.active_sessions = {}
-        self.bootstrap_server = bootstrap_server
         self.args.ib_device, net_card = find_best_roce_for_gpu(self.args.gpu_id)
         if self.args.ib_device:
             logger.info(
@@ -338,9 +339,6 @@ class KVManager:
                                                                                      net_card))
         else:
             raise Exception("No ROCE IB device found...")
-
-    def set_bootstrap_server(self, bootstrap_server):
-        self.bootstrap_server = bootstrap_server
 
     def calculate_token_kv_address(self, layer_id: int, token_index: int):
         # 获取基础地址 - 每层的KV数据指针
