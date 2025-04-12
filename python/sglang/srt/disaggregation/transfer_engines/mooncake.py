@@ -125,3 +125,6 @@ class MooncakeTransferEngine:
 
     def get_session_id(self):
         return self.session_id
+
+    def get_metadata_server(self):
+        return self.config.metadata_server

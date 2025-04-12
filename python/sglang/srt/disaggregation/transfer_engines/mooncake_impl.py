@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 import struct
 import threading
 from functools import cache
@@ -9,11 +10,14 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import numpy.typing as npt
+import requests
 import zmq
 from aiohttp import web
 
+from sglang.srt.server_args import ServerArgs
 from sglang.srt.disaggregation.transfer_engines.mooncake import MooncakeTransferEngine
 from sglang.srt.disaggregation.utils import DisaggregationMode
+from sglang.srt.utils import get_free_port
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,8 @@ def group_concurrent_contiguous(
 
 class KVArgs:
     engine_rank: int
+    tp_size: int
+
     kv_data_ptrs: list[int]
     kv_data_lens: list[int]
     kv_item_lens: list[int]
@@ -68,13 +74,15 @@ RequestPoolType = Dict[int, Tuple[npt.NDArray[np.int64], Optional[int]]]
 WaitingPoolType = Dict[
     int, Tuple[str, list[int], npt.NDArray[np.int64], list[int], int]
 ]
-KVSENDER_POLLING_PORT = 17788
-KVRECEIVER_POLLING_PORT = 27788
+
+
+# KVSENDER_POLLING_PORT = 17788
+# KVRECEIVER_POLLING_PORT = 27788
 
 
 class KVManager:
     # TODO: make it general and support multiple transfer backend before merging
-    def __init__(self, args: KVArgs, disaggregation_mode: DisaggregationMode):
+    def __init__(self, args: KVArgs, disaggregation_mode: DisaggregationMode, server_args: ServerArgs) -> None:
         self.engine = MooncakeTransferEngine(args.gpu_id)
         self.kv_args = args
         self.disaggregation_mode = disaggregation_mode
@@ -82,6 +90,7 @@ class KVManager:
         self.request_status: Dict[int, KVPoll] = {}
         self.server_socket = zmq.Context().socket(zmq.PULL)
         self.register_buffer_to_engine()
+        self.prefill_addr = self.parse_prefill_addr(server_args)
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             self.waiting_pool: WaitingPoolType = {}
             self.transfer_event = threading.Event()
@@ -93,6 +102,15 @@ class KVManager:
                 f"Unsupported DisaggregationMode: {self.disaggregation_mode}"
             )
 
+    def parse_prefill_addr(self, args: ServerArgs):
+        port = args.port  # http_server_port
+        dist_init_addr = args.dist_init_addr
+        if dist_init_addr:
+            ip_address = socket.gethostbyname(dist_init_addr.split(":")[0])
+        else:
+            ip_address = self.engine.get_localhost()
+        return f"{ip_address}:{port}"
+
     def register_buffer_to_engine(self):
         for kv_data_ptr, kv_data_len in zip(
             self.kv_args.kv_data_ptrs, self.kv_args.kv_data_lens
@@ -103,6 +121,12 @@ class KVManager:
             self.kv_args.aux_data_ptrs, self.kv_args.aux_data_lens
         ):
             self.engine.register(aux_data_ptr, aux_data_len)
+
+    def register_zmq_info_to_metadata(self, key, value):
+        metadata_server = self.engine.get_metadata_server()
+        respo = requests.put(metadata_server, params={"key": key}, json=value)
+        if respo.status_code != 200:
+            raise Exception("error registering zmq info to medadata")
 
     @cache
     def _connect(self, endpoint: str):
@@ -186,14 +210,24 @@ class KVManager:
         )
         return status
 
-    def sync_status_to_decode_endpoint(self, remote: str, room: int):
+    @cache
+    def query_zmq_rank_addr(self, key):
+        resp = requests.get(self.engine.get_metadata_server(), params={"key": key})
+        if resp.status_code != 200:
+            raise Exception("Cant query receiver rank port for key {}, resp status {}".format(key, resp.status_code))
+        ip, port = resp.json()['zmq_ip'], resp.json()['zmq_port']
+        return ip, port
+
+    def sync_status_to_decode_endpoint(self, remote: str, room: int, mooncake_session_id: str):
         if ":" in remote:
             remote = remote.split(":")[0]
+        query_key = self.get_decode_register_key(mooncake_session_id)
+        _, receiver_rank_port = self.query_zmq_rank_addr(query_key)
         self._connect(
             "tcp://"
             + remote
             + ":"
-            + str(KVRECEIVER_POLLING_PORT + self.kv_args.engine_rank)
+            + str(receiver_rank_port)
         ).send_multipart(
             [
                 str(room).encode("ascii"),
@@ -202,7 +236,10 @@ class KVManager:
         )
 
     def start_prefill_thread(self):
-        sender_rank_port = KVSENDER_POLLING_PORT + self.kv_args.engine_rank
+        sender_rank_port = self.get_free_zmq_port(self.get_pd_meta_key())
+        self.register_zmq_info_to_metadata(
+            self.get_prefill_register_key(self.prefill_addr),
+            {"zmq_port": sender_rank_port, "zmq_ip": self.engine.get_localhost()})
         self.server_socket.bind("tcp://*:" + str(sender_rank_port))
 
         def prefill_thread():
@@ -221,10 +258,10 @@ class KVManager:
                 endpoint = endpoint.decode("ascii")
                 mooncake_session_id = mooncake_session_id.decode("ascii")
                 bootstrap_room = int(bootstrap_room.decode("ascii"))
-                dst_ptrs = list(struct.unpack(f"{len(dst_ptrs)//8}Q", dst_ptrs))
+                dst_ptrs = list(struct.unpack(f"{len(dst_ptrs) // 8}Q", dst_ptrs))
                 dst_kv_indices = np.frombuffer(dst_kv_indices, dtype=np.int64)
                 dst_aux_ptrs = list(
-                    struct.unpack(f"{len(dst_aux_ptrs)//8}Q", dst_aux_ptrs)
+                    struct.unpack(f"{len(dst_aux_ptrs) // 8}Q", dst_aux_ptrs)
                 )
                 dst_aux_index = int(dst_aux_index.decode("ascii"))
                 self.waiting_pool[bootstrap_room] = (
@@ -258,7 +295,7 @@ class KVManager:
                         dst_aux_ptrs,
                         dst_aux_index,
                     ) = self.waiting_pool.pop(room)
-                    self.sync_status_to_decode_endpoint(endpoint, room)
+                    self.sync_status_to_decode_endpoint(endpoint, room, mooncake_session_id)
                     (
                         prefill_kv_indices,
                         prefill_aux_index,
@@ -271,7 +308,7 @@ class KVManager:
                     )
                     if ret != 0:
                         status = KVPoll.Failed
-                        self.sync_status_to_decode_endpoint(endpoint, room)
+                        self.sync_status_to_decode_endpoint(endpoint, room, mooncake_session_id)
                         continue
                     ret = self.send_aux(
                         mooncake_session_id,
@@ -284,12 +321,14 @@ class KVManager:
                     else:
                         status = KVPoll.Success
                     self.request_status[room] = status
-                    self.sync_status_to_decode_endpoint(endpoint, room)
+                    self.sync_status_to_decode_endpoint(endpoint, room, mooncake_session_id)
 
         threading.Thread(target=transfer_thread).start()
 
     def start_decode_thread(self):
-        receiver_rank_port = KVRECEIVER_POLLING_PORT + self.kv_args.engine_rank
+        receiver_rank_port = self.get_free_zmq_port(self.get_pd_meta_key())
+        self.register_zmq_info_to_metadata(self.get_decode_register_key(self.engine.get_session_id()),
+                                           {"zmq_port": receiver_rank_port, "zmq_ip": self.engine.get_localhost()})
         self.server_socket.bind("tcp://*:" + str(receiver_rank_port))
 
         def decode_thread():
@@ -331,6 +370,29 @@ class KVManager:
     def get_session_id(self):
         return self.engine.get_session_id()
 
+    @cache
+    def get_free_zmq_port(self, key):
+        return get_free_port()
+
+    @cache
+    def get_pd_meta_key(self):
+        """
+        :param local_addr
+        :param tp_size: prefill or decode tp size
+        :param tp_rank: prefill or decode tp rank
+        """
+        return f"{self.engine.session_id}_{self.disaggregation_mode}_{self.kv_args.tp_size}_{self.kv_args.engine_rank}"
+
+    @cache
+    def get_prefill_register_key(self, prefill_addr: str):
+        key = f'{prefill_addr}_{self.kv_args.tp_size}_{self.kv_args.engine_rank}'
+        return key
+
+    @cache
+    def get_decode_register_key(self, session_id):
+        key = f'{session_id}_{self.kv_args.tp_size}_{self.kv_args.engine_rank}'
+        return key
+
 
 class KVSender:
 
@@ -357,15 +419,18 @@ class KVSender:
 class KVReceiver:
 
     def __init__(
-        self, mgr: KVManager, bootstrap_addr: str, bootstrap_room: Optional[int] = None
+        self, mgr: KVManager, prefill_addr: str, bootstrap_addr: str, bootstrap_room: Optional[int] = None
     ):
         self.bootstrap_room = bootstrap_room
         self.bootstrap_addr = bootstrap_addr
+        self.prefill_addr = prefill_addr
         self.kv_mgr = mgr
+        prefill_ip, sender_rank_port = self.kv_mgr.query_zmq_rank_addr(self.kv_mgr.get_prefill_register_key(prefill_addr))
+        logger.info(f"KVReceiver init: prefill_addr={prefill_addr}, sender_rank_port={sender_rank_port}")
         self.prefill_server_url = (
-            bootstrap_addr.split(":")[0]
+            prefill_ip
             + ":"
-            + str(KVSENDER_POLLING_PORT + self.kv_mgr.kv_args.engine_rank)
+            + str(sender_rank_port)
         )
         self.decode_ip = self.kv_mgr.get_localhost()
         self.session_id = self.kv_mgr.get_session_id()
@@ -409,6 +474,7 @@ class KVBootstrapServer:
         self.port = port
         self.app = web.Application()
         self.store = dict()
+        self.pd_meta_store = dict()
         self.lock = asyncio.Lock()
         self._setup_routes()
 
@@ -420,6 +486,7 @@ class KVBootstrapServer:
         self.thread.start()
 
     def _setup_routes(self):
+        # For mooncake transfer engine metadata, this should be replaced or removed soon
         self.app.router.add_route("*", "/metadata", self._handle_metadata)
 
     async def _handle_metadata(self, request: web.Request):
@@ -494,4 +561,5 @@ class KVBootstrapServer:
             self.thread.join(timeout=2)
             logger.info("Server thread stopped")
 
-    def poll(self) -> KVPoll: ...
+    def poll(self) -> KVPoll:
+        ...

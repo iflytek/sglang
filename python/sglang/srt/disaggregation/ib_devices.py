@@ -34,6 +34,7 @@ import os
 import pyverbs.device as d
 import pynvml
 
+
 def get_device_list(prefix, gpu_no=0, roce_version=2, port_num=1):
     lst = d.get_device_list()
     if len(lst) == 0:
@@ -54,6 +55,7 @@ def get_device_list(prefix, gpu_no=0, roce_version=2, port_num=1):
 
     return device_list
 
+
 def get_gpu_pci_address(gpu_no):
     """Get PCI address of specified GPU device"""
     pynvml.nvmlInit()
@@ -62,6 +64,7 @@ def get_gpu_pci_address(gpu_no):
     pynvml.nvmlShutdown()
     return pci_info.busId
 
+
 def get_net_device_from_rdma(rdma_dev):
     """Get network interface name corresponding to RoCE device"""
     net_path = f"/sys/class/infiniband/{rdma_dev}/device/net"
@@ -69,12 +72,14 @@ def get_net_device_from_rdma(rdma_dev):
         return os.listdir(net_path)[0]  # Read network interface name
     return None
 
+
 def normalize_pci_addr(pci_addr):
     """Standardize PCI address format, e.g. 00000000:08:00.0 -> 0000:08:00.0"""
     parts = pci_addr.split(":")
     if len(parts) == 3:  # Format like "00000000:08:00.0"
         return f"{int(parts[0], 16):04x}:{parts[1]}:{parts[2]}"  # Convert to "0000:08:00.0"
     return pci_addr  # Return original format
+
 
 def find_best_roce_for_gpu(gpu_no, prefix="mlx"):
     """Find the most affinity RoCE network card based on GPU device number"""
@@ -94,6 +99,7 @@ def find_best_roce_for_gpu(gpu_no, prefix="mlx"):
     if best_rdma_dev:
         net_dev = get_net_device_from_rdma(best_rdma_dev)
         return best_rdma_dev, net_dev
+
 
 if __name__ == '__main__':
     gpu_no = 0  # GPU device number to query

@@ -84,6 +84,8 @@ class PrefillBootstrapQueue:
     def _init_kv_manager(self) -> KVManager:
         kv_args = self.kvarg_cls()
         kv_args.engine_rank = self.tp_rank
+        kv_args.tp_size = self.tp_size
+
         kv_data_ptrs, kv_data_lens, kv_item_lens = (
             self.token_to_kv_pool.get_contiguous_buf_infos()
         )
@@ -104,7 +106,7 @@ class PrefillBootstrapQueue:
         ]
         kv_args.ib_device = "mock-ib-device"
         kv_args.gpu_id = self.scheduler.gpu_id
-        kv_manager = self.kvmgr_cls(kv_args, DisaggregationMode("prefill"))
+        kv_manager = self.kvmgr_cls(kv_args, DisaggregationMode("prefill"), self.scheduler.server_args)
         return kv_manager
 
     def add(self, req: Req) -> None:

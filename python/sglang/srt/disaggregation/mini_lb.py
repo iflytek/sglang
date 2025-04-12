@@ -81,6 +81,7 @@ class MiniLoadBalancer:
         # Parse and transform prefill_server
         parsed_url = urllib.parse.urlparse(prefill_server)
         hostname = parsed_url.hostname
+        parsed_url.netloc
         bootstrap_host = f"{hostname}"
 
         modified_request = request_data.copy()
@@ -88,6 +89,7 @@ class MiniLoadBalancer:
             {
                 "bootstrap_host": bootstrap_host,
                 "bootstrap_room": random.randint(1,100000),
+                "prefill_addr": f"{parsed_url.netloc}"
 
                 # "bootstrap_room": random.randint(0, 2**63 - 1),
             }
@@ -224,6 +226,7 @@ async def handle_chat_completions(request_data: dict):
         {
             "bootstrap_host": hostname,
             "bootstrap_room": random.randint(0, 2**63 - 1),
+            "prefill_addr": f"{parsed_url.netloc}"
         }
     )
     # Check if streaming is requested

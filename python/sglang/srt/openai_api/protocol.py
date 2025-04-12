@@ -363,6 +363,7 @@ class ChatCompletionRequest(BaseModel):
 
     bootstrap_host: Optional[str] = None
     bootstrap_room: Optional[int] = None
+    prefill_addr: Optional[str] = None
 
 class FunctionResponse(BaseModel):
     """Function response."""

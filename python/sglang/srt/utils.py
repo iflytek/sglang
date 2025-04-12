@@ -1838,3 +1838,8 @@ def get_local_ip_by_remote(addr="8.8.8.8:8888"):
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.connect((host, int(port.strip())))  # connecting fake server to get ip host
         return s.getsockname()[0]
+
+def get_free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('', 0))  # allocated by sys
+        return s.getsockname()[1]

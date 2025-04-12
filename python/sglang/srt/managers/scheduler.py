@@ -839,6 +839,7 @@ class Scheduler(
                 eos_token_ids=self.model_config.hf_eos_token_id,
                 bootstrap_host=recv_req.bootstrap_host,
                 bootstrap_room=recv_req.bootstrap_room,
+                prefill_addr=recv_req.prefill_addr,
             )
             req.tokenizer = self.tokenizer
 
