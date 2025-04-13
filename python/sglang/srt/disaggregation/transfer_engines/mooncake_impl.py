@@ -131,7 +131,7 @@ class KVManager:
         metadata_server = self.engine.get_metadata_server()
         respo = requests.put(metadata_server, params={"key": key}, json=value)
         if respo.status_code != 200:
-            raise Exception("error registering zmq info to medadata")
+            raise Exception("error registering zmq info to meta data")
 
     @classmethod
     def _connect(cls, endpoint: str):
@@ -394,9 +394,6 @@ class KVManager:
     @cache
     def get_pd_meta_key(self):
         """
-        :param local_addr
-        :param tp_size: prefill or decode tp size
-        :param tp_rank: prefill or decode tp rank
         """
         return f"{self.engine.session_id}_{self.disaggregation_mode}_{self.kv_args.tp_size}_{self.kv_args.engine_rank}"
 
