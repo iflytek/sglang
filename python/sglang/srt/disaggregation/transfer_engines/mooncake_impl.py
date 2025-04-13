@@ -81,6 +81,11 @@ WaitingPoolType = Dict[
 
 
 class KVManager:
+    _ctx = zmq.Context()
+    _socket_cache = {}
+    _socket_locks = {}
+    _global_lock = threading.Lock()
+
     # TODO: make it general and support multiple transfer backend before merging
     def __init__(self, args: KVArgs, disaggregation_mode: DisaggregationMode, server_args: ServerArgs) -> None:
         self.engine = MooncakeTransferEngine(args.gpu_id)
@@ -128,11 +133,21 @@ class KVManager:
         if respo.status_code != 200:
             raise Exception("error registering zmq info to medadata")
 
-    @cache
-    def _connect(self, endpoint: str):
-        socket = zmq.Context().socket(zmq.PUSH)
-        socket.connect(endpoint)
-        return socket
+    @classmethod
+    def _connect(cls, endpoint: str):
+        with cls._global_lock:
+            if endpoint not in cls._socket_cache:
+                sock = cls._ctx.socket(zmq.PUSH)
+                sock.connect(endpoint)
+                cls._socket_cache[endpoint] = sock
+                cls._socket_locks[endpoint] = threading.Lock()
+            return cls._socket_cache[endpoint], cls._socket_locks[endpoint]
+
+    # @cache
+    # def _connect(self, endpoint: str):
+    #     socket = zmq.Context().socket(zmq.PUSH)
+    #     socket.connect(endpoint)
+    #     return socket
 
     def send_kvcache(
         self,
@@ -223,17 +238,19 @@ class KVManager:
             remote = remote.split(":")[0]
         query_key = self.get_decode_register_key(mooncake_session_id)
         _, receiver_rank_port = self.query_zmq_rank_addr(query_key)
-        self._connect(
+        sock, lock = self._connect(
             "tcp://"
             + remote
             + ":"
             + str(receiver_rank_port)
-        ).send_multipart(
-            [
-                str(room).encode("ascii"),
-                str(self.request_status[room]).encode("ascii"),
-            ]
         )
+        with lock:
+            sock.send_multipart(
+                [
+                    str(room).encode("ascii"),
+                    str(self.request_status[room]).encode("ascii"),
+                ]
+            )
 
     def start_prefill_thread(self):
         sender_rank_port = self.get_free_zmq_port(self.get_pd_meta_key())
@@ -417,6 +434,10 @@ class KVSender:
 
 
 class KVReceiver:
+    _ctx = zmq.Context()
+    _socket_cache = {}
+    _socket_locks = {}
+    _global_lock = threading.Lock()
 
     def __init__(
         self, mgr: KVManager, prefill_addr: str, bootstrap_addr: str, bootstrap_room: Optional[int] = None
@@ -425,7 +446,8 @@ class KVReceiver:
         self.bootstrap_addr = bootstrap_addr
         self.prefill_addr = prefill_addr
         self.kv_mgr = mgr
-        prefill_ip, sender_rank_port = self.kv_mgr.query_zmq_rank_addr(self.kv_mgr.get_prefill_register_key(prefill_addr))
+        prefill_ip, sender_rank_port = self.kv_mgr.query_zmq_rank_addr(
+            self.kv_mgr.get_prefill_register_key(prefill_addr))
         logger.info(f"KVReceiver init: prefill_addr={prefill_addr}, sender_rank_port={sender_rank_port}")
         self.prefill_server_url = (
             prefill_ip
@@ -436,11 +458,20 @@ class KVReceiver:
         self.session_id = self.kv_mgr.get_session_id()
         self.kv_mgr.set_status(bootstrap_room, KVPoll.WaitingForInput)
 
-    @cache
-    def _connect(self, endpoint: str):
-        socket = zmq.Context().socket(zmq.PUSH)
-        socket.connect(endpoint)
-        return socket
+    # @cache
+    # def _connect(self, endpoint: str):
+    #     socket = zmq.Context().socket(zmq.PUSH)
+    #     socket.connect(endpoint)
+    #     return socket
+    @classmethod
+    def _connect(cls, endpoint: str):
+        with cls._global_lock:
+            if endpoint not in cls._socket_cache:
+                sock = cls._ctx.socket(zmq.PUSH)
+                sock.connect(endpoint)
+                cls._socket_cache[endpoint] = sock
+                cls._socket_locks[endpoint] = threading.Lock()
+            return cls._socket_cache[endpoint], cls._socket_locks[endpoint]
 
     def init(self, kv_indices: npt.NDArray[np.int64], aux_index: Optional[int] = None):
         self.kv_mgr.enqueue_request(self.bootstrap_room, kv_indices, aux_index)
@@ -450,17 +481,19 @@ class KVReceiver:
         packed_aux_data_ptrs = b"".join(
             struct.pack("Q", ptr) for ptr in self.kv_mgr.kv_args.aux_data_ptrs
         )
-        self._connect("tcp://" + self.prefill_server_url).send_multipart(
-            [
-                self.decode_ip.encode("ascii"),
-                self.session_id.encode("ascii"),
-                str(self.bootstrap_room).encode("ascii"),
-                packed_kv_data_ptrs,
-                kv_indices.tobytes(),
-                packed_aux_data_ptrs,
-                str(aux_index).encode("ascii"),
-            ]
-        )
+        socket, lock = self._connect("tcp://" + self.prefill_server_url)
+        with lock:
+            socket.send_multipart(
+                [
+                    self.decode_ip.encode("ascii"),
+                    self.session_id.encode("ascii"),
+                    str(self.bootstrap_room).encode("ascii"),
+                    packed_kv_data_ptrs,
+                    kv_indices.tobytes(),
+                    packed_aux_data_ptrs,
+                    str(aux_index).encode("ascii"),
+                ]
+            )
 
     def poll(self) -> KVPoll:
         return self.kv_mgr.check_status(self.bootstrap_room)
