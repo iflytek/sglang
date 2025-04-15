@@ -455,11 +455,6 @@ class KVReceiver:
         self.session_id = self.kv_mgr.get_session_id()
         self.kv_mgr.set_status(bootstrap_room, KVPoll.WaitingForInput)
 
-    # @cache
-    # def _connect(self, endpoint: str):
-    #     socket = zmq.Context().socket(zmq.PUSH)
-    #     socket.connect(endpoint)
-    #     return socket
     @classmethod
     def _connect(cls, endpoint: str):
         with cls._global_lock:

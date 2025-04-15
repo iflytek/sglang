@@ -3,7 +3,7 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass
-from sglang.srt.disaggregation.ib_devices import find_best_roce_for_gpu
+from sglang.srt.disaggregation.ib_devices import find_best_rdma_ib_device
 from sglang.srt.utils import get_local_ip_by_remote
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ class MooncakeTransferEngineConfig:
         return MooncakeTransferEngineConfig.from_file(config_file_path)
 
     @staticmethod
-    def load_auto(gpu_id) -> "MooncakeTransferEngineConfig":
+    def load_auto(device_name) -> "MooncakeTransferEngineConfig":
         """Load config from a file specified in the environment variable."""
         metadata_server = os.getenv("MOONCAKE_METADATA_SERVER", None)
         if metadata_server is None:
@@ -48,8 +48,6 @@ class MooncakeTransferEngineConfig:
             )
         local_hostname = os.getenv("MOONCAKE_LOCAL_HOSTNAME", default=get_local_ip_by_remote())
         protocol = os.getenv("MOONCAKE_PROTOCOL", default="rdma")
-        default_ib_device, _ = find_best_roce_for_gpu(gpu_id)
-        device_name = os.getenv("MOONCAKE_RDMA_DEVICE_NAME", default=default_ib_device)
         return MooncakeTransferEngineConfig(
             local_hostname=local_hostname,
             metadata_server=metadata_server,
@@ -59,7 +57,7 @@ class MooncakeTransferEngineConfig:
 
 class MooncakeTransferEngine:
 
-    def __init__(self, gpu_id):
+    def __init__(self, ib_device):
         try:
             from mooncake.engine import TransferEngine
         except ImportError as e:
@@ -72,7 +70,7 @@ class MooncakeTransferEngine:
         self.engine = TransferEngine()
 
         try:
-            self.config = MooncakeTransferEngineConfig.load_auto(gpu_id)
+            self.config = MooncakeTransferEngineConfig.load_auto(ib_device)
             logger.info("Mooncake Configuration loaded successfully.")
         except ValueError as e:
             logger.error(e)
@@ -81,7 +79,7 @@ class MooncakeTransferEngine:
             logger.error("An error occurred while loading the configuration: %s", exc)
             raise
 
-        self.config = MooncakeTransferEngineConfig.load_auto(gpu_id)
+        self.config = MooncakeTransferEngineConfig.load_auto(ib_device)
 
         session_suffix = "_" + str(uuid.uuid4())
         self.session_id = self.config.local_hostname + session_suffix

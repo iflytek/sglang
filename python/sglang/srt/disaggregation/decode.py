@@ -35,6 +35,7 @@ from sglang.srt.disaggregation.base import (
     KVArgs,
     KVPoll,
 )
+from sglang.srt.disaggregation.ib_devices import find_best_rdma_ib_device
 from sglang.srt.disaggregation.utils import (
     DisaggregationMode,
     KVClassType,
@@ -128,9 +129,9 @@ class DecodePreallocQueue:
         kv_args.aux_item_lens = [
             metadata_buffer[0].nbytes for metadata_buffer in self.metadata_buffers
         ]
-        kv_args.ib_device = "mock-ib-device"
+        kv_args.ib_device, _ = find_best_rdma_ib_device(self.scheduler.gpu_id)
         kv_manager_class = get_kv_class(self.transfer_backend, KVClassType.MANAGER)
-        kv_manager = kv_manager_class(kv_args, DisaggregationMode.DECODE, self.scheduler.gpu_id)
+        kv_manager = kv_manager_class(kv_args, DisaggregationMode.DECODE, self.scheduler.server_args)
         return kv_manager
 
     def add(self, req: Req) -> None:

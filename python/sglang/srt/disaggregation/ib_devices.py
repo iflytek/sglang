@@ -81,7 +81,7 @@ def normalize_pci_addr(pci_addr):
     return pci_addr  # Return original format
 
 
-def find_best_roce_for_gpu(gpu_no, prefix="mlx"):
+def find_best_rdma_ib_device(gpu_no, prefix="mlx"):
     """Find the most affinity RoCE network card based on GPU device number"""
     gpu_pci = normalize_pci_addr(get_gpu_pci_address(gpu_no))
     roce_devices = {k: normalize_pci_addr(v) for k, v in get_device_list(prefix).items()}
@@ -103,5 +103,5 @@ def find_best_roce_for_gpu(gpu_no, prefix="mlx"):
 
 if __name__ == '__main__':
     gpu_no = 0  # GPU device number to query
-    rdma_dev, net_dev = find_best_roce_for_gpu(gpu_no)
+    rdma_dev, net_dev = find_best_rdma_ib_device(gpu_no)
     print(f"GPU {gpu_no} most affinity RDMA device: {rdma_dev}, corresponding network interface: {net_dev}")

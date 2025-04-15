@@ -16,7 +16,7 @@ from pyverbs.mr import MR
 from pyverbs.addr import GID, AHAttr
 from pyverbs.wr import RecvWR, SGE, SendWR
 from pyverbs.enums import *
-from sglang.srt.disaggregation.ib_devices import find_best_roce_for_gpu
+from sglang.srt.disaggregation.ib_devices import find_best_rdma_ib_device
 from sglang.srt.disaggregation.conn import KVPoll
 import uuid
 from typing import Dict, Optional
@@ -331,7 +331,7 @@ class KVManager:
         self.aux_item_lens = args.aux_item_lens
 
         self.active_sessions = {}
-        self.args.ib_device, net_card = find_best_roce_for_gpu(self.args.gpu_id)
+        self.args.ib_device, net_card = find_best_rdma_ib_device(self.args.gpu_id)
         if self.args.ib_device:
             logger.info(
                 "Current Process Using the  gpu id: {}, ib_device: {} net:{}".format(self.args.gpu_id,

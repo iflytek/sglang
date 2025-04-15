@@ -312,6 +312,8 @@ async def handle_generate_request(request_data: dict):
         {
             "bootstrap_host": hostname,
             "bootstrap_room": random.randint(0, 2**63 - 1),
+            "prefill_addr": f"{parsed_url.netloc}"
+
         }
     )
 

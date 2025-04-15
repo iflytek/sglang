@@ -31,6 +31,7 @@ from sglang.srt.disaggregation.base import (
     KVArgs,
     KVPoll,
 )
+from sglang.srt.disaggregation.ib_devices import find_best_rdma_ib_device
 from sglang.srt.disaggregation.utils import (
     DisaggregationMode,
     KVClassType,
@@ -113,9 +114,10 @@ class PrefillBootstrapQueue:
         kv_args.aux_item_lens = [
             metadata_buffer[0].nbytes for metadata_buffer in self.metadata_buffers
         ]
-        kv_args.ib_device = "mock-ib-device"
+        print(type(self.scheduler.gpu_id))
+        kv_args.ib_device, _ = find_best_rdma_ib_device(self.scheduler.gpu_id)
         kv_manager_class = get_kv_class(self.transfer_backend, KVClassType.MANAGER)
-        kv_manager = kv_manager_class(kv_args, DisaggregationMode.PREFILL, self.scheduler.gpu_id)
+        kv_manager = kv_manager_class(kv_args, DisaggregationMode.PREFILL, self.scheduler.server_args)
         return kv_manager
 
     def add(self, req: Req) -> None:
@@ -182,7 +184,7 @@ class SchedulerDisaggregationPrefillMixin:
         self: Scheduler, batch: ScheduleBatch, result: GenerationBatchResult
     ) -> None:
         """
-        Transfer kv for prefill completed requests and add it into disagg_prefill_infight_queue
+        Transfer kv for prefill completed requests and add it into disagg_prefill_inflight_queue
         Adapted from process_batch_result_prefill
         """
 
