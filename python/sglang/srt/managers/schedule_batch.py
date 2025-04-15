@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from enum import Enum, auto
 
 # Copyright 2023-2024 SGLang Team
@@ -44,7 +45,7 @@ import triton.language as tl
 from sglang.global_config import global_config
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.constrained.base_grammar_backend import BaseGrammarObject
-from sglang.srt.disaggregation.conn import KVSender
+from sglang.srt.disaggregation.base import BaseKVSender
 from sglang.srt.disaggregation.decode import ScheduleBatchDisaggregationDecodeMixin
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 from sglang.srt.mem_cache.chunk_cache import ChunkCache
@@ -157,7 +158,7 @@ class Modality(Enum):
 @dataclasses.dataclass
 class MultimodalDataItem:
     """
-    A single multimodal data, from a single image/video/audio or other
+    A single multimodal data, from a single image/video/audio or others
     """
 
     modality: Modality
@@ -195,25 +196,54 @@ class MultimodalDataItem:
 
     def set_pad_value(self):
         """
-        Set the pad value after first hashign the data
+        Set the pad value after first hashing the data
         """
 
-        def tensor_hash(f):
-            f_list = flatten_nested_list(f)
-            f_list = [x.flatten() if isinstance(x, torch.Tensor) else x for x in f_list]
-            f_cat = torch.concat(f_list).contiguous().numpy().tobytes()
-            return hash(f_cat)
+        def data_hash(data) -> int:
+            hash_bytes = hashlib.sha256(data).digest()[:8]
+            return int.from_bytes(hash_bytes, byteorder="big", signed=False)
+
+        def tensor_hash(tensor_list) -> int:
+            """
+            hash a tensor or a tensor list
+            """
+            tensor = tensor_list
+            if isinstance(tensor_list, list):
+                tensor_list = flatten_nested_list(tensor_list)
+                tensor_list = [
+                    x.flatten() if isinstance(x, torch.Tensor) else x
+                    for x in tensor_list
+                ]
+                tensor = torch.concat(tensor_list)
+
+            tensor = tensor.detach().contiguous()
+
+            if tensor.dtype == torch.bfloat16:
+                # memoryview() doesn't support PyTorch's BFloat16 dtype
+                tensor = tensor.float()
+
+            assert isinstance(tensor, torch.Tensor)
+            if tensor.is_cuda:
+                # TODO: improve this
+                tensor_cpu = tensor.cpu()
+            else:
+                tensor_cpu = tensor
+
+            mv = memoryview(tensor_cpu.numpy())
+            return data_hash(mv.tobytes())
 
         def hash_feature(f):
             if isinstance(f, list):
                 if isinstance(f[0], torch.Tensor):
                     return tensor_hash(f)
-                return hash(tuple(flatten_nested_list(f)))
+                return data_hash(tuple(flatten_nested_list(f)))
             elif isinstance(f, np.ndarray):
                 arr = np.ascontiguousarray(f)
                 arr_bytes = arr.tobytes()
-                return hash(arr_bytes)
-            return hash(f)
+                return data_hash(arr_bytes)
+            elif isinstance(f, torch.Tensor):
+                return tensor_hash([f])
+            return data_hash(f)
 
         if self.is_audio():
             self.hash = hash_feature(self.audio_features)
@@ -238,6 +268,9 @@ class MultimodalDataItem:
             self.modality == Modality.VIDEO
         ) and not MultimodalDataItem.is_empty_list(self.pixel_values)
 
+    def is_valid(self) -> bool:
+        return self.is_image() or self.is_video() or self.is_audio()
+
     def validate(self):
         ...
         # TODO
@@ -256,7 +289,7 @@ class MultimodalInputs:
     mrope_position_delta: Optional[torch.Tensor] = None
 
     # image
-    im_token_id: Optional[torch.Tensor] = None
+    im_token_id: Optional[int] = None
     im_start_id: Optional[int] = None
     im_end_id: Optional[int] = None
     slice_start_id: Optional[int] = None
@@ -276,11 +309,7 @@ class MultimodalInputs:
         )
 
         assert isinstance(ret.mm_items, list)
-        ret.mm_items = [
-            item
-            for item in ret.mm_items
-            if item.is_audio() or item.is_image() or item.is_video()
-        ]
+        ret.mm_items = [item for item in ret.mm_items if item.is_valid()]
 
         assert len(ret.mm_items) != 0
 
@@ -292,7 +321,6 @@ class MultimodalInputs:
             item.set_pad_value()
 
         optional_args = [
-            "modalities",
             "im_token_id",
             "im_start_id",
             "im_end_id",
@@ -315,8 +343,8 @@ class MultimodalInputs:
         """ """
         return any(item.is_audio() for item in self.mm_items)
 
-    def collect_image_inputs(self) -> List[torch.Tensor]:
-        return [item.pixel_values for item in self.mm_items if item.is_image()]
+    def contains_mm_input(self) -> bool:
+        return any(True for item in self.mm_items if item.is_valid())
 
     def merge(self, other: MultimodalInputs):
         """
@@ -330,10 +358,8 @@ class MultimodalInputs:
 
         # args needed to be merged
         optional_args = [
-            "items",
-            "image_offsets",
+            "mm_items",
             "image_pad_len",
-            # "modalities", # modalities should be ["multi-images"] (one entry) even for multiple images
         ]
         for arg in optional_args:
             self_arg = getattr(self, arg, None)
@@ -449,6 +475,10 @@ class Req:
         self.temp_scaled_logprobs = False
         self.top_p_normalized_logprobs = False
 
+        # Latency Breakdown
+        self.queue_time_start = None
+        self.queue_time_end = None
+
         # Logprobs (return values)
         self.input_token_logprobs_val: Optional[List[float]] = None
         self.input_token_logprobs_idx: Optional[List[int]] = None
@@ -496,9 +526,8 @@ class Req:
         # For disaggregation
         self.bootstrap_host: str = bootstrap_host
         self.bootstrap_room: Optional[int] = bootstrap_room
+        self.disagg_kv_sender: Optional[BaseKVSender] = None
         self.prefill_addr: str = prefill_addr
-
-        self.disagg_kv_sender: Optional[KVSender] = None
 
         # used for warmup because we don't have a pair yet when init
         self.skip_kv_transfer: bool = False
@@ -576,7 +605,7 @@ class Req:
             )
 
         all_ids = self.origin_input_ids_unpadded + self.output_ids
-        return all_ids[self.surr_offset:], self.read_offset - self.surr_offset
+        return all_ids[self.surr_offset :], self.read_offset - self.surr_offset
 
     def check_finished(self):
         if self.finished():
@@ -617,7 +646,7 @@ class Req:
         # Check stop strings
         if len(self.sampling_params.stop_strs) > 0:
             tail_str = self.tokenizer.decode(
-                self.output_ids[-(self.sampling_params.stop_str_max_len + 1):]
+                self.output_ids[-(self.sampling_params.stop_str_max_len + 1) :]
             )
 
             for stop_str in self.sampling_params.stop_strs:
@@ -913,15 +942,15 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 # NOTE: the encoder part should be considered as a whole
                 assert len(req.prefix_indices) == 0
                 input_ids[i] = input_ids[i][encoder_len:]
-                encoder_out_cache_loc.append(self.out_cache_loc[pt: pt + encoder_len])
+                encoder_out_cache_loc.append(self.out_cache_loc[pt : pt + encoder_len])
                 decoder_out_cache_loc.append(
-                    self.out_cache_loc[pt + encoder_len: pt + req.extend_input_len]
+                    self.out_cache_loc[pt + encoder_len : pt + req.extend_input_len]
                 )
                 self.extend_lens[i] -= encoder_len
                 self.extend_num_tokens -= encoder_len
             else:
                 decoder_out_cache_loc.append(
-                    self.out_cache_loc[pt: pt + req.extend_input_len]
+                    self.out_cache_loc[pt : pt + req.extend_input_len]
                 )
                 self.prefix_lens[i] -= encoder_len
 
@@ -960,7 +989,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         # Init tensors
         reqs = self.reqs
-        input_ids = [r.fill_ids[len(r.prefix_indices):] for r in reqs]
+        input_ids = [r.fill_ids[len(r.prefix_indices) :] for r in reqs]
         extend_num_tokens = sum(len(ids) for ids in input_ids)
         seq_lens = [len(r.fill_ids) for r in reqs]
         prefix_lens = [len(r.prefix_indices) for r in reqs]
@@ -1035,8 +1064,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                     global_start_idx = req.logprob_start_len
 
                 logprob_token_ids = req.origin_input_ids[
-                                    global_start_idx + 1: global_end_idx + 1
-                                    ]
+                    global_start_idx + 1 : global_end_idx + 1
+                ]
                 extend_input_logprob_token_ids.extend(logprob_token_ids)
 
                 # We will need req.extend_input_len - req.extend_logprob_start_len number of
@@ -1110,7 +1139,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             for i in range(bs):
                 self.req_to_token_pool.write(
                     (req_pool_indices[i], slice(prefix_lens[i], seq_lens[i])),
-                    out_cache_loc[pt: pt + extend_lens[i]],
+                    out_cache_loc[pt : pt + extend_lens[i]],
                 )
                 pt += extend_lens[i]
 
@@ -1227,18 +1256,18 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             if isinstance(self.tree_cache, ChunkCache):
                 # ChunkCache does not have eviction
                 token_indices = self.req_to_token_pool.req_to_token[
-                                req.req_pool_idx, : seq_lens_cpu[idx]
-                                ]
+                    req.req_pool_idx, : seq_lens_cpu[idx]
+                ]
                 self.token_to_kv_pool_allocator.free(token_indices)
                 self.req_to_token_pool.free(req.req_pool_idx)
             else:
                 # TODO: apply more fine-grained retraction
                 last_uncached_pos = (
-                                        len(req.prefix_indices) // server_args.page_size
-                                    ) * server_args.page_size
+                    len(req.prefix_indices) // server_args.page_size
+                ) * server_args.page_size
                 token_indices = self.req_to_token_pool.req_to_token[
-                                req.req_pool_idx, last_uncached_pos: seq_lens_cpu[idx]
-                                ]
+                    req.req_pool_idx, last_uncached_pos : seq_lens_cpu[idx]
+                ]
                 self.token_to_kv_pool_allocator.free(token_indices)
                 self.req_to_token_pool.free(req.req_pool_idx)
 
@@ -1262,8 +1291,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         total_max_new_tokens = sum(r.sampling_params.max_new_tokens for r in self.reqs)
 
         new_estimate_ratio = (
-                                 total_decoded_tokens + global_config.retract_decode_steps * len(self.reqs)
-                             ) / total_max_new_tokens
+            total_decoded_tokens + global_config.retract_decode_steps * len(self.reqs)
+        ) / total_max_new_tokens
         new_estimate_ratio = min(1.0, new_estimate_ratio)
 
         return retracted_reqs, new_estimate_ratio
@@ -1360,7 +1389,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 i
                 for i in range(len(self.reqs))
                 if not self.reqs[i].finished()
-                   and self.reqs[i] is not chunked_req_to_exclude
+                and self.reqs[i] is not chunked_req_to_exclude
             ]
 
         if keep_indices is None or len(keep_indices) == 0:

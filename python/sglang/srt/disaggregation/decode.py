@@ -28,11 +28,19 @@ import numpy as np
 import torch
 from torch.distributed import ProcessGroup
 
-from sglang.srt.disaggregation.conn import KVArgs, KVManager, KVPoll, KVReceiver
-from sglang.srt.disaggregation.transfer_engines import load_transfer_engine_classes
+from sglang.srt.disaggregation.base import (
+    BaseKVManager,
+    BaseKVReceiver,
+    BaseKVSender,
+    KVArgs,
+    KVPoll,
+)
 from sglang.srt.disaggregation.utils import (
     DisaggregationMode,
+    KVClassType,
     ReqToMetadataIdxAllocator,
+    TransferBackend,
+    get_kv_class,
     poll_and_all_reduce,
 )
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
@@ -52,7 +60,7 @@ if TYPE_CHECKING:
 @dataclass
 class DecodeRequest:
     req: Req
-    kv_receiver: KVReceiver
+    kv_receiver: BaseKVReceiver
     waiting_for_input: bool = False
     metadata_buffer_index: int = -1
 
@@ -76,6 +84,7 @@ class DecodePreallocQueue:
         tp_rank: int,
         tp_size: int,
         bootstrap_port: int,
+        transfer_backend: TransferBackend,
     ):
         self.req_to_token_pool = req_to_token_pool
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
@@ -95,12 +104,11 @@ class DecodePreallocQueue:
 
         # Queue for requests pending pre-allocation
         self.queue: List[DecodeRequest] = []
-        self.kvmgr_cls, self.kvsender_cls, self.kvrecv_cls, self.kvarg_cls, self.kvbootstrap_cls = load_transfer_engine_classes(
-            scheduler.server_args.disaggregation_kv_engine)
+        self.transfer_backend = transfer_backend
         self.kv_manager = self._init_kv_manager()
 
-    def _init_kv_manager(self) -> KVManager:
-        kv_args = self.kvarg_cls()
+    def _init_kv_manager(self) -> BaseKVManager:
+        kv_args = KVArgs()
         kv_args.engine_rank = self.tp_rank
         kv_args.tp_size = self.tp_size
         kv_data_ptrs, kv_data_lens, kv_item_lens = (
@@ -121,14 +129,15 @@ class DecodePreallocQueue:
             metadata_buffer[0].nbytes for metadata_buffer in self.metadata_buffers
         ]
         kv_args.ib_device = "mock-ib-device"
-        kv_args.gpu_id = self.scheduler.gpu_id
-        kv_manager = self.kvmgr_cls(kv_args, DisaggregationMode("decode"),self.scheduler.server_args)
+        kv_manager_class = get_kv_class(self.transfer_backend, KVClassType.MANAGER)
+        kv_manager = kv_manager_class(kv_args, DisaggregationMode.DECODE, self.scheduler.gpu_id)
         return kv_manager
 
     def add(self, req: Req) -> None:
         """Add a request to the pending queue."""
 
-        kv_receiver = self.kvrecv_cls(
+        kv_receiver_class = get_kv_class(self.transfer_backend, KVClassType.RECEIVER)
+        kv_receiver = kv_receiver_class(
             mgr=self.kv_manager,
             prefill_addr=req.prefill_addr,
             bootstrap_addr=f"{req.bootstrap_host}:{self.bootstrap_port}",

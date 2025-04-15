@@ -294,10 +294,14 @@ class GenerateReqInput:
         elif isinstance(self.audio_data, list):
             self.audio_data = self.audio_data * self.parallel_sample_num
 
-            if self.sampling_params is None:
-                self.sampling_params = [{}] * num
-            elif not isinstance(self.sampling_params, list):
-                self.sampling_params = [self.sampling_params] * num
+    def _normalize_sampling_params(self, num):
+        """Normalize sampling parameters for batch processing."""
+        if self.sampling_params is None:
+            self.sampling_params = [{}] * num
+        elif isinstance(self.sampling_params, dict):
+            self.sampling_params = [self.sampling_params] * num
+        else:  # Already a list
+            self.sampling_params = self.sampling_params * self.parallel_sample_num
 
     def _normalize_rid(self, num):
         """Normalize request IDs for batch processing."""
@@ -698,10 +702,17 @@ class UpdateWeightsFromDistributedReqOutput:
 
 @dataclass
 class UpdateWeightsFromTensorReqInput:
-    # List containing one serialized Dict[str, torch.Tensor] per TP worker
-    serialized_named_tensors: List[bytes]
-    load_format: Optional[str]
-    flush_cache: bool
+    """Update model weights from tensor input.
+
+    - Tensors are serialized for transmission
+    - Data is structured in JSON for easy transmission over HTTP
+    """
+
+    serialized_named_tensors: List[Union[str, bytes]]
+    # Optional format specification for loading
+    load_format: Optional[str] = None
+    # Whether to flush the cache after updating weights
+    flush_cache: bool = True
 
 
 @dataclass
