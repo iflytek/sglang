@@ -976,6 +976,7 @@ class Scheduler(
             self._add_request_to_queue(req)
 
     def _add_request_to_queue(self, req: Req):
+        req.queue_time_start = time.time()
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             self.disagg_prefill_pending_queue.add(req)
 
@@ -983,7 +984,6 @@ class Scheduler(
             self.disagg_decode_prealloc_queue.add(req)
 
         else:
-            req.queue_time_start = time.time()
             self.waiting_queue.append(req)
 
     def _extend_requests_to_queue(self, reqs: List[Req], is_retracted: bool = False):
