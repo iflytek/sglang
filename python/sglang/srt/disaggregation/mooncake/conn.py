@@ -112,7 +112,6 @@ class MooncakeKVManager(BaseKVManager):
         self.request_status: Dict[int, KVPoll] = {}
         self.rank_port = None
         self.server_socket = zmq.Context().socket(zmq.PULL)
-        self.page_size = server_args.page_size
         self.register_buffer_to_engine()
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             self.transfer_queue = queue.Queue()
@@ -131,32 +130,12 @@ class MooncakeKVManager(BaseKVManager):
         for kv_data_ptr, kv_data_len in zip(
             self.kv_args.kv_data_ptrs, self.kv_args.kv_data_lens
         ):
-            # Ensure the buffer is page aligned
-            if kv_data_ptr % self.page_size != 0:
-                logger.error(f"KV data pointer not page aligned: {kv_data_ptr}")
-                raise RuntimeError("KV data pointer not page aligned")
-            
-            # Ensure the length is page aligned
-            aligned_len = (kv_data_len + self.page_size - 1) // self.page_size * self.page_size
-            if aligned_len != kv_data_len:
-                logger.warning(f"KV data length not page aligned: {kv_data_len}, aligned to {aligned_len}")
-            
-            self.engine.register(kv_data_ptr, aligned_len)
+            self.engine.register(kv_data_ptr, kv_data_len)
 
         for aux_data_ptr, aux_data_len in zip(
             self.kv_args.aux_data_ptrs, self.kv_args.aux_data_lens
         ):
-            # Ensure the buffer is page aligned
-            if aux_data_ptr % self.page_size != 0:
-                logger.error(f"Aux data pointer not page aligned: {aux_data_ptr}")
-                raise RuntimeError("Aux data pointer not page aligned")
-            
-            # Ensure the length is page aligned
-            aligned_len = (aux_data_len + self.page_size - 1) // self.page_size * self.page_size
-            if aligned_len != aux_data_len:
-                logger.warning(f"Aux data length not page aligned: {aux_data_len}, aligned to {aligned_len}")
-            
-            self.engine.register(aux_data_ptr, aligned_len)
+            self.engine.register(aux_data_ptr, aux_data_len)
 
     @cache
     def _connect(self, endpoint: str):
@@ -181,35 +160,25 @@ class MooncakeKVManager(BaseKVManager):
             src_ptr = self.kv_args.kv_data_ptrs[layer_id]
             dst_ptr = dst_kv_ptrs[layer_id]
             item_len = self.kv_args.kv_item_lens[layer_id]
-            src_len = self.kv_args.kv_data_lens[layer_id]
 
             for prefill_index, decode_index in zip(prefill_kv_blocks, dst_kv_blocks):
-                # Find the first non-padding index
-                valid_indices = prefill_index != -1
-                if not np.any(valid_indices):
-                    continue  # Skip if all indices are padding
-                    
-                first_valid_idx = np.where(valid_indices)[0][0]
-                last_valid_idx = np.where(valid_indices)[0][-1]
+                # Ensure we don't exceed the source buffer size
+                src_addr = src_ptr + int(prefill_index[0]) * item_len
+                dst_addr = dst_ptr + int(decode_index[0]) * item_len
                 
-                # Calculate addresses and length based on valid indices
-                src_addr = src_ptr + int(prefill_index[first_valid_idx]) * item_len
-                dst_addr = dst_ptr + int(decode_index[first_valid_idx]) * item_len
-                length = item_len * (last_valid_idx - first_valid_idx + 1)
-
-                # Ensure addresses are within registered memory bounds
-                if src_addr < src_ptr or src_addr + length > src_ptr + src_len:
-                    logger.error(f"Source address out of bounds: src_addr={src_addr}, src_ptr={src_ptr}, length={length}, src_len={src_len}")
-                    return -1
-
-                # Ensure addresses are page aligned
-                if src_addr % self.page_size != 0 or dst_addr % self.page_size != 0:
-                    logger.error(f"Address not page aligned: src_addr={src_addr}, dst_addr={dst_addr}")
-                    return -1
-
+                # Calculate the actual transfer length based on the minimum of source and destination lengths
+                src_length = item_len * len(prefill_index)
+                dst_length = item_len * len(decode_index)
+                transfer_length = min(src_length, dst_length)
+                
+                # Ensure the transfer length is valid and within bounds
+                if transfer_length <= 0:
+                    logger.warning(f"Invalid transfer length: {transfer_length}")
+                    continue
+                    
                 # TODO: make async later
                 status = self.engine.transfer_sync(
-                    mooncake_session_id, src_addr, dst_addr, length
+                    mooncake_session_id, src_addr, dst_addr, transfer_length
                 )
                 if status != 0:
                     return status
@@ -263,22 +232,13 @@ class MooncakeKVManager(BaseKVManager):
                 # NOTE: after bootstrapping we can mark the req as waiting for input
                 self.request_status[room] = KVPoll.WaitingForInput
 
-        def transfer_thread1():
+        def transfer_thread():
             # TODO: Shall we use KVPoll.Transferring state?
             while True:
                 try:
                     kv_chunk: TransferKVChunk = self.transfer_queue.get(timeout=0.01)
                     req = self.transfer_infos[kv_chunk.room]
-                    logger.info(
-                        f"TransferInfo: dst_kv_indices len={len(req.dst_kv_indices)}, page_size={self.kv_args.kv_item_lens[0]}")
-                    logger.info(
-                        f"KVChunk: prefill_kv_indices len={len(kv_chunk.prefill_kv_indices)}, index_slice={kv_chunk.index_slice}")
-
                     chunked_dst_kv_indice = req.dst_kv_indices[kv_chunk.index_slice]
-                    logger.info(f"chunked_dst_kv_indice len={len(chunked_dst_kv_indice)}, prefill_kv_indices len={len(kv_chunk.prefill_kv_indices)}")
-                    assert len(chunked_dst_kv_indice) == len(
-                        kv_chunk.prefill_kv_indices
-                    )
 
                     ret = self.send_kvcache(
                         req.mooncake_session_id,
@@ -312,64 +272,6 @@ class MooncakeKVManager(BaseKVManager):
                 except queue.Empty:
                     continue
 
-        def transfer_thread():
-            # TODO: Shall we use KVPoll.Transferring state?
-            while True:
-                try:
-                    kv_chunk: TransferKVChunk = self.transfer_queue.get(timeout=0.01)
-                    req = self.transfer_infos[kv_chunk.room]
-                    logger.info(
-                        f"TransferInfo: dst_kv_indices len={len(req.dst_kv_indices)}, page_size={self.kv_args.kv_item_lens[0]}")
-                    logger.info(
-                        f"KVChunk: prefill_kv_indices len={len(kv_chunk.prefill_kv_indices)}, index_slice={kv_chunk.index_slice}")
-
-                    chunked_dst_kv_indice = req.dst_kv_indices[kv_chunk.index_slice]
-                    logger.info(
-                        f"chunked_dst_kv_indice len={len(chunked_dst_kv_indice)}, prefill_kv_indices len={len(kv_chunk.prefill_kv_indices)}")
-
-                    # 移除断言 assert len(chunked_dst_kv_indice) == len(kv_chunk.prefill_kv_indices)
-                    # 改为处理对齐
-                    if len(chunked_dst_kv_indice) > len(kv_chunk.prefill_kv_indices):
-                        padding = np.full(
-                            len(chunked_dst_kv_indice) - len(kv_chunk.prefill_kv_indices),
-                            -1,
-                            dtype=np.int64
-                        )
-                        prefill_kv_indices = np.concatenate([kv_chunk.prefill_kv_indices, padding])
-                    else:
-                        prefill_kv_indices = kv_chunk.prefill_kv_indices
-
-                    ret = self.send_kvcache(
-                        req.mooncake_session_id,
-                        prefill_kv_indices,  # 使用对齐后的数据
-                        req.dst_kv_ptrs,
-                        chunked_dst_kv_indice,
-                    )
-                    if ret != 0:
-                        self.request_status[kv_chunk.room] = KVPoll.Failed
-                        self.sync_status_to_decode_endpoint(
-                            req.endpoint, req.dst_port, req.room
-                        )
-                        continue
-
-                    if kv_chunk.is_last:
-                        # Only the last chunk we need to send the aux data
-                        ret = self.send_aux(
-                            req.mooncake_session_id,
-                            kv_chunk.prefill_aux_index,
-                            req.dst_aux_ptrs,
-                            req.dst_aux_index,
-                        )
-                        self.request_status[req.room] = (
-                            KVPoll.Success if ret == 0 else KVPoll.Failed
-                        )
-                        self.sync_status_to_decode_endpoint(
-                            req.endpoint, req.dst_port, req.room
-                        )
-                        self.transfer_infos.pop(req.room)
-
-                except queue.Empty:
-                    continue
         threading.Thread(target=bootstrap_thread).start()
         threading.Thread(target=transfer_thread).start()
 
@@ -475,7 +377,6 @@ class MooncakeKVSender(BaseKVSender):
         index_slice: slice,
         is_last: bool,
     ):
-        logger.info(f"MooncakeKVSender.send: kv_indices len={len(kv_indices)}, index_slice={index_slice}")
         if not is_last:
             self.kv_mgr.add_transfer_request(
                 self.bootstrap_room, kv_indices, index_slice, False
