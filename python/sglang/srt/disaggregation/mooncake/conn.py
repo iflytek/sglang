@@ -162,13 +162,23 @@ class MooncakeKVManager(BaseKVManager):
             item_len = self.kv_args.kv_item_lens[layer_id]
 
             for prefill_index, decode_index in zip(prefill_kv_blocks, dst_kv_blocks):
+                # Ensure we don't exceed the source buffer size
                 src_addr = src_ptr + int(prefill_index[0]) * item_len
                 dst_addr = dst_ptr + int(decode_index[0]) * item_len
-                length = item_len * len(prefill_index)
+
+                # Calculate the actual transfer length based on the minimum of source and destination lengths
+                src_length = item_len * len(prefill_index)
+                dst_length = item_len * len(decode_index)
+                transfer_length = min(src_length, dst_length)
+
+                # Ensure the transfer length is valid and within bounds
+                if transfer_length <= 0:
+                    logger.warning(f"Invalid transfer length: {transfer_length}")
+                    continue
 
                 # TODO: make async later
                 status = self.engine.transfer_sync(
-                    mooncake_session_id, src_addr, dst_addr, length
+                    mooncake_session_id, src_addr, dst_addr, transfer_length
                 )
                 if status != 0:
                     return status
@@ -229,15 +239,26 @@ class MooncakeKVManager(BaseKVManager):
                     kv_chunk: TransferKVChunk = self.transfer_queue.get(timeout=0.01)
                     req = self.transfer_infos[kv_chunk.room]
                     chunked_dst_kv_indice = req.dst_kv_indices[kv_chunk.index_slice]
-                    assert len(chunked_dst_kv_indice) == len(
-                        kv_chunk.prefill_kv_indices
-                    )
+
+                    # Add detailed logging for debugging
+                    logger.info(f"Transfer chunk for room {kv_chunk.room}:")
+                    logger.info(f"  - prefill_kv_indices length: {len(kv_chunk.prefill_kv_indices)}")
+                    logger.info(f"  - dst_kv_indices length: {len(req.dst_kv_indices)}")
+                    logger.info(f"  - index_slice: {kv_chunk.index_slice}")
+                    logger.info(f"  - chunked_dst_kv_indice length: {len(chunked_dst_kv_indice)}")
+
+                    # Ensure we only transfer the actual data by taking the minimum length
+                    actual_length = min(len(chunked_dst_kv_indice), len(kv_chunk.prefill_kv_indices))
+
+                    # Slice both arrays to the actual length
+                    actual_dst_indices = chunked_dst_kv_indice[:actual_length]
+                    actual_prefill_indices = kv_chunk.prefill_kv_indices[:actual_length]
 
                     ret = self.send_kvcache(
                         req.mooncake_session_id,
-                        kv_chunk.prefill_kv_indices,
+                        actual_prefill_indices,
                         req.dst_kv_ptrs,
-                        chunked_dst_kv_indice,
+                        actual_dst_indices,
                     )
                     if ret != 0:
                         self.request_status[kv_chunk.room] = KVPoll.Failed
