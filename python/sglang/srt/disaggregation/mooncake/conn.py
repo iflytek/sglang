@@ -240,12 +240,16 @@ class MooncakeKVManager(BaseKVManager):
                     req = self.transfer_infos[kv_chunk.room]
                     chunked_dst_kv_indice = req.dst_kv_indices[kv_chunk.index_slice]
                     
+                    # Add detailed logging for debugging
+                    logger.debug(f"Transfer chunk for room {kv_chunk.room}:")
+                    logger.debug(f"  - prefill_kv_indices length: {len(kv_chunk.prefill_kv_indices)}")
+                    logger.debug(f"  - dst_kv_indices length: {len(req.dst_kv_indices)}")
+                    logger.debug(f"  - index_slice: {kv_chunk.index_slice}")
+                    logger.debug(f"  - chunked_dst_kv_indice length: {len(chunked_dst_kv_indice)}")
+                    
                     # Ensure we only transfer the actual data by taking the minimum length
                     actual_length = min(len(chunked_dst_kv_indice), len(kv_chunk.prefill_kv_indices))
-                    if actual_length == 0:
-                        logger.warning(f"Empty transfer chunk detected for room {kv_chunk.room}")
-                        continue
-                        
+                    
                     # Slice both arrays to the actual length
                     actual_dst_indices = chunked_dst_kv_indice[:actual_length]
                     actual_prefill_indices = kv_chunk.prefill_kv_indices[:actual_length]
