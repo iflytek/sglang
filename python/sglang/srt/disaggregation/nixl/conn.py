@@ -438,6 +438,8 @@ class NixlKVSender(BaseKVSender):
         self.num_kv_indices = num_kv_indices
         self.aux_index = aux_index
 
+    def set_request_id(self, request_id: str):
+        self.request_id = request_id
     def send(
         self,
         kv_indices: npt.NDArray[np.int64],

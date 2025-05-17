@@ -60,6 +60,7 @@ class TransferKVChunk:
     index_slice: slice
     is_last: bool
     prefill_aux_index: Optional[int]
+    request_id: Optional[str]
 
 
 @dataclasses.dataclass
@@ -323,7 +324,8 @@ class MooncakeKVManager(BaseKVManager):
                                 kv_chunk.index_slice
                             ]
                             if  len(chunked_dst_kv_indice) != len(kv_chunk.prefill_kv_indices):
-                                logging.error( f"truncate ! len(chunked_dst_kv_indice) = {len(chunked_dst_kv_indice)}, len(kv_chunk.prefill_kv_indices) = {len(kv_chunk.prefill_kv_indices)}")
+                                logging.error( f"truncate 1 {kv_chunk.request_id}! len(chunked_dst_kv_indice) = {len(chunked_dst_kv_indice)}, len(kv_chunk.prefill_kv_indices) = {len(kv_chunk.prefill_kv_indices)}")
+                                logger.error(f"truncate 2 {kv_chunk.request_id}, len(req.dst_kv_indices){len(req.dst_kv_indices)}, kv_chunk.index_slice: {kv_chunk.index_slice}")
                                 kv_chunk.prefill_kv_indices=kv_chunk.prefill_kv_indices[:len(chunked_dst_kv_indice)]
                             ret = self.send_kvcache(
                                 req.mooncake_session_id,
@@ -430,6 +432,7 @@ class MooncakeKVManager(BaseKVManager):
         index_slice: slice,
         is_last: bool,
         aux_index: Optional[int] = None,
+        request_id: Optional[str] = None
     ):
         assert self.disaggregation_mode == DisaggregationMode.PREFILL
         assert not is_last or (is_last and aux_index is not None)
@@ -441,6 +444,7 @@ class MooncakeKVManager(BaseKVManager):
                 index_slice=index_slice,
                 is_last=is_last,
                 prefill_aux_index=aux_index,
+                request_id=request_id,
             )
         )
         self.update_status(bootstrap_room, KVPoll.WaitingForInput)
@@ -525,7 +529,7 @@ class MooncakeKVSender(BaseKVSender):
         self.aux_index = None
         self.bootstrap_server_url = bootstrap_addr
         self.session_id = self.kv_mgr.get_session_id()
-
+        self.request_id = None
     def init(self, num_kv_indices: int, aux_index: Optional[int] = None):
         self.num_kv_indices = num_kv_indices
         self.aux_index = aux_index
@@ -538,7 +542,8 @@ class MooncakeKVSender(BaseKVSender):
     ):
         if not is_last:
             self.kv_mgr.add_transfer_request(
-                self.bootstrap_room, kv_indices, index_slice, False
+                self.bootstrap_room, kv_indices, index_slice, False,
+                request_id=self.request_id
             )
         else:
             self.kv_mgr.add_transfer_request(
@@ -547,7 +552,10 @@ class MooncakeKVSender(BaseKVSender):
                 index_slice,
                 True,
                 aux_index=self.aux_index,
+                request_id=self.request_id,
             )
+    def set_request_id(self, request_id: str):
+        self.request_id = request_id
 
     def poll(self) -> KVPoll:
         return self.kv_mgr.check_status(self.bootstrap_room)

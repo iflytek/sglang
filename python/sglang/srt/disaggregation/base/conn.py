@@ -63,6 +63,13 @@ class BaseKVSender(ABC):
         ...
 
     @abstractmethod
+    def set_request_id(self, request_id: str):
+        """
+        Set up the request_id for tracing
+        """
+        ...
+
+    @abstractmethod
     def poll(self) -> KVPoll:
         """
         Check the status of the kv cache transfer
@@ -94,6 +101,13 @@ class BaseKVReceiver(ABC):
         """
         ...
 
+    @abstractmethod
+    def set_request_id(self, request_id: str):
+        """
+        Set up the request_id for tracing
+        """
+        ...
+    
     @abstractmethod
     def poll(self) -> KVPoll:
         """

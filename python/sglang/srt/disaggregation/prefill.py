@@ -131,6 +131,7 @@ class PrefillBootstrapQueue:
             bootstrap_addr=f"{req.bootstrap_host}:{self.bootstrap_port}",
             bootstrap_room=req.bootstrap_room,
         )
+        req.disagg_kv_sender.set_request_id(req.rid)
         self._process_req(req)
         self.queue.append(req)
 
