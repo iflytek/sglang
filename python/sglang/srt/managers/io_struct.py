@@ -737,13 +737,6 @@ class TokenizedGenerateReqInput(BaseReq):
     # For observability
     time_stats: Optional[Union[APIServerReqTimeStats, DPControllerReqTimeStats]] = None
 
-    # PP pipeline alignment for L2 host cache load-back.
-    # PP0 writes the actual number of tokens it loaded from its host cache here
-    # before forwarding this request object to PP1. PP1 uses it as a cap so
-    # both stages extend prefix_indices by exactly the same amount.
-    # Default 0 means "no cap" (non-PP path or first scheduling round).
-    pp_load_back_len: int = 0
-
 
 @dataclass
 class BatchTokenizedGenerateReqInput(BaseBatchReq):

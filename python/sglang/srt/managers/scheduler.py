@@ -1536,8 +1536,6 @@ class Scheduler(
                 time_stats=recv_req.time_stats,
             )
             req.tokenizer = self.tokenizer
-            # Propagate PP load-back alignment value forwarded by PP0.
-            req.pp_load_back_len = getattr(recv_req, "pp_load_back_len", 0)
 
             if self.disaggregation_mode != DisaggregationMode.NULL:
                 # Invalid request for disaggregated mode

@@ -194,6 +194,13 @@ class SchedulerPPMixin:
         send_transfer_work = []
         send_consensus_bootstrapped_work = []
         send_release_work = []
+        # PP + HiCache L2 alignment: PP0 sends {rid: pp_load_back_len} to PP1
+        # after scheduling (end of each iteration) so PP1 can update waiting
+        # Reqs in the NEXT iteration before get_new_batch_prefill runs.
+        # PP1 blocks on recv; PP0 unblocks it when it reaches the send at the
+        # end of the same iteration. This is the same blocking pattern used by
+        # bootstrapped_rids / transferred_rids — no pre-loop warmup needed.
+        send_load_back_work = []
 
         while True:
             server_is_idle = True
@@ -222,6 +229,23 @@ class SchedulerPPMixin:
                 transferred_rids = self._pp_pd_get_prefill_transferred_ids()
                 self._pp_commit_comm_work(send_transfer_work)
                 tmbs[mb_id] = transferred_rids
+
+                # PP + HiCache L2 alignment:
+                # PP1 (is_last_rank): receive the load_back_map sent by PP0 in
+                # the previous iteration and apply it to waiting Reqs so that
+                # pp_load_back_len is set before get_new_batch_prefill runs.
+                # PP0 (not is_last_rank): commit the previous send_load_back_work.
+                if self.pp_group.is_last_rank:
+                    if self.enable_hierarchical_cache:
+                        load_back_map = self._pp_recv_pyobj_from_prev_stage()
+                        if load_back_map:
+                            req_map = {r.rid: r for r in self.waiting_queue}
+                            for rid, load_len in load_back_map.items():
+                                r = req_map.get(rid)
+                                if r is not None:
+                                    r.pp_load_back_len = load_len
+                else:
+                    self._pp_commit_comm_work(send_load_back_work)
 
                 self.process_prefill_chunk()
                 batch = self.get_new_batch_prefill()
@@ -293,22 +317,6 @@ class SchedulerPPMixin:
                 if tmbs[next_mb_id] is not None:
                     self.process_disagg_prefill_inflight_queue(next_release_rids)
                 if not self.pp_group.is_last_rank:
-                    # PP + HiCache L2 alignment: write pp_load_back_len from the
-                    # just-scheduled batch back into the outgoing recv_reqs so PP1
-                    # can cap its own init_load_back to the same amount.
-                    # Must happen AFTER get_new_batch_prefill (line ~227) and
-                    # BEFORE the actual send below.
-                    if self.enable_hierarchical_cache and self.mbs[mb_id] is not None:
-                        _load_back_map = {
-                            r.rid: r.pp_load_back_len
-                            for r in self.mbs[mb_id].reqs
-                            if r.pp_load_back_len > 0
-                        }
-                        if _load_back_map:
-                            for rr in recv_reqs:
-                                v = _load_back_map.get(getattr(rr, "rid", None))
-                                if v:
-                                    rr.pp_load_back_len = v
                     self.send_req_work = self._pp_send_pyobj_to_next_stage(
                         recv_reqs, async_send=True
                     )
@@ -318,6 +326,19 @@ class SchedulerPPMixin:
                     send_transfer_work = self._pp_send_pyobj_to_next_stage(
                         transferred_rids, async_send=True
                     )
+                    # PP + HiCache L2 alignment: send {rid: pp_load_back_len}
+                    # map so PP1 can update Req.pp_load_back_len before scheduling.
+                    # Always send (symmetric with PP1's unconditional recv).
+                    # Include ALL scheduled reqs (even 0-value) so PP1 can
+                    # reset stale values from previous rounds.
+                    if self.enable_hierarchical_cache:
+                        _load_back_map = {}
+                        if self.mbs[mb_id] is not None:
+                            for r in self.mbs[mb_id].reqs:
+                                _load_back_map[r.rid] = r.pp_load_back_len
+                        send_load_back_work = self._pp_send_pyobj_to_next_stage(
+                            _load_back_map, async_send=True
+                        )
                     if self.cur_batch:
                         torch.cuda.current_stream().wait_event(self.launch_event)
                         self.send_proxy_work = self._pp_send_dict_to_next_stage(
