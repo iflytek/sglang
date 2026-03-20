@@ -2007,6 +2007,14 @@ class Scheduler(
             # Reset batch_is_full to try preemption with a prefill adder.
             self.running_batch.batch_is_full = False
 
+        # Drive GPU→Host write completions and Host→storage backup submissions
+        # every scheduling iteration, regardless of waiting_queue size.
+        # In disagg-prefill mode the waiting_queue is often empty between
+        # requests, so placing this after the early-return guard would starve
+        # the write pipeline and prevent mooncake writes from ever completing.
+        if self.enable_hierarchical_cache:
+            self.tree_cache.check_hicache_events()
+
         if (
             self.running_batch.batch_is_full or len(self.waiting_queue) == 0
         ) and self.chunked_req is None:
@@ -2025,9 +2033,6 @@ class Scheduler(
         ):
             self.running_batch.batch_is_full = True
             return None
-
-        if self.enable_hierarchical_cache:
-            self.tree_cache.check_hicache_events()
 
         # Get priority queue
         self.policy.calc_priority(self.waiting_queue, self.running_batch)
