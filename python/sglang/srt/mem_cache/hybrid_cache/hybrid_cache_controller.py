@@ -172,6 +172,8 @@ class HybridCacheController(BaseHiCacheController):
         storage_backend_extra_config: Optional[dict] = None,
         pp_rank: int = 0,
         pp_size: int = 1,
+        attn_cp_rank: int = 0,
+        attn_cp_size: int = 1,
         transfer_layer_num: Optional[int] = None,
         enable_storage_metrics: bool = False,
     ):
@@ -191,6 +193,8 @@ class HybridCacheController(BaseHiCacheController):
             storage_backend_extra_config=storage_backend_extra_config,
             pp_rank=pp_rank,
             pp_size=pp_size,
+            attn_cp_rank=attn_cp_rank,
+            attn_cp_size=attn_cp_size,
             enable_storage_metrics=enable_storage_metrics,
         )
         self.transfer_layer_num = self.transfer_layer_num or self.layer_num
