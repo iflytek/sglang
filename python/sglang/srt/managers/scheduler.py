@@ -2115,6 +2115,24 @@ class Scheduler(
                 )
 
             req.init_next_round_input(self.tree_cache)
+
+            # PP + HiCache: init_load_back (called in add_one_req when
+            # host_hit_length > 0) loads host-cached KV into GPU and extends
+            # prefix_indices, shrinking extend_input_len.  Each PP stage has
+            # its own independent host tree, so the load_back length can differ
+            # across stages → divergent extend_input_len → shape mismatch.
+            #
+            # host_hit_length is only an entry guard; init_load_back ignores it
+            # and determines the actual load length from its own host tree nodes.
+            # Forwarding PP0's host_hit_length to PP1 does NOT fix the mismatch
+            # because PP1's load_back would still use PP1's different nodes.
+            #
+            # Safe minimal fix: only PP stage 0 drives init_load_back.
+            # Non-zero PP stages skip it (host_hit_length=0) so extend_input_len
+            # matches PP0 exactly.  Mooncake writes on all PP stages are unaffected.
+            if self.pp_size > 1 and self.enable_hierarchical_cache and self.pp_rank != 0:
+                req.host_hit_length = 0
+
             res = adder.add_one_req(
                 req,
                 has_chunked_req=(self.chunked_req is not None),
