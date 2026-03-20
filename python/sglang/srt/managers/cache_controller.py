@@ -1087,6 +1087,11 @@ class HiCacheController:
             # todo: allow partial success
             extra_info = HiCacheStorageExtraInfo(prefix_keys=prefix_keys)
             success = self.page_set_func(batch_hashes, batch_host_indices, extra_info)
+            logger.debug(
+                f"[HiCache] _page_backup: tp_rank={self.tp_rank}, "
+                f"pages={len(batch_hashes)}, success={success}, "
+                f"first_key={batch_hashes[0] if batch_hashes else None}"
+            )
             if not success:
                 logger.warning(
                     f"Write page to storage: {len(batch_hashes)} pages failed."
