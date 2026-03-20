@@ -651,6 +651,11 @@ class MooncakeStore(HiCacheStorage, MooncakeBaseStore):
             keys = [f"{prefix}_{key}" for key in keys]
 
         key_strs, buffer_ptrs, buffer_sizes = self._batch_preprocess(keys, host_indices)
+        logger.info(
+            f"[HiCache] batch_set_v1: writing {len(key_strs)} keys, "
+            f"first={key_strs[0] if key_strs else None}, "
+            f"last={key_strs[-1] if key_strs else None}"
+        )
         exist_result = self._batch_exist(key_strs)
 
         set_keys = []
