@@ -482,13 +482,12 @@ class HiCacheController:
             model_name, storage_backend_extra_config
         )
         # for MLA models, only one rank needs to backup the KV cache
-        # But with CP, each CP rank holds different sequence chunks,
-        # so every CP rank must write independently.
+        # MLA/NSA KV cache is identical across all CP ranks,
+        # so only tp_rank=0 writes and other ranks read from it.
         self.backup_skip = (
             self.storage_config.is_mla_model
             # todo: load balancing
             and self.storage_config.tp_rank != 0
-            and self.storage_config.attn_cp_size <= 1
         )
 
         # Use storage backend factory for dynamic backend creation
