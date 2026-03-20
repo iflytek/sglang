@@ -761,6 +761,12 @@ class Scheduler(
         self.session_controller = SessionController(self.tree_cache)
         self.forward_sleep_time = None
         self._engine_paused = False
+        # PP + HiCache: PP0 accumulates {rid: host_hit_length} here to forward
+        # to PP1 via p2p so PP1 can use PP0's host_hit_length instead of its own
+        # (which may differ due to NSA indexer overhead in PP1's prefetch).
+        self._pp_hicache_hhl_pending: dict = {}
+        # PP1 stores the received {rid: host_hit_length} from PP0 here.
+        self._pp_hicache_hhl_map: dict = {}
 
     def init_chunked_prefill(self):
         # Init chunked prefill
@@ -2115,6 +2121,31 @@ class Scheduler(
                 )
 
             req.init_next_round_input(self.tree_cache)
+
+            # PP + HiCache: PP0 and PP1 each call match_prefix independently
+            # and may get different host_hit_length (PP1 prefetches extra NSA
+            # indexer data, so its host tree may have fewer tokens inserted).
+            # Divergent host_hit_length → divergent extend_input_len → shape
+            # mismatch when PP0 sends hidden_states to PP1.
+            #
+            # PP stages are NOT lockstep inside get_new_batch_prefill():
+            # PP0 sends recv_reqs to PP1 async at end of iteration; PP1
+            # receives them at start of the NEXT iteration.  An in-loop
+            # pp_group allreduce would deadlock.
+            #
+            # Solution: PP0 records scheduled {rid→host_hit_length} in
+            # self._pp_hicache_hhl_pending (sent to PP1 via p2p at iter end).
+            # PP1 overrides its host_hit_length from self._pp_hicache_hhl_map
+            # (populated when the p2p message is received next iter).
+            if self.pp_size > 1 and self.enable_hierarchical_cache:
+                if self.pp_rank == 0:
+                    # PP0 records its host_hit_length to forward to PP1
+                    self._pp_hicache_hhl_pending[req.rid] = req.host_hit_length
+                else:
+                    # PP1 uses PP0's previously forwarded value if available
+                    if req.rid in self._pp_hicache_hhl_map:
+                        req.host_hit_length = self._pp_hicache_hhl_map.pop(req.rid)
+
             res = adder.add_one_req(
                 req,
                 has_chunked_req=(self.chunked_req is not None),

@@ -223,6 +223,14 @@ class SchedulerPPMixin:
                 self._pp_commit_comm_work(send_transfer_work)
                 tmbs[mb_id] = transferred_rids
 
+                # PP + HiCache: PP1 receives PP0's {rid→host_hit_length} map
+                # (sent by PP0 at end of previous iteration, after transferred_rids).
+                # Must be received here to match PP0's send order exactly.
+                if self.enable_hierarchical_cache and not self.pp_group.is_first_rank:
+                    hhl_map = self._pp_recv_pyobj_from_prev_stage()
+                    if hhl_map:
+                        self._pp_hicache_hhl_map.update(hhl_map)
+
                 self.process_prefill_chunk()
                 batch = self.get_new_batch_prefill()
                 batch = self.maybe_prepare_mlp_sync_batch(batch)
@@ -302,6 +310,13 @@ class SchedulerPPMixin:
                     send_transfer_work = self._pp_send_pyobj_to_next_stage(
                         transferred_rids, async_send=True
                     )
+                    # PP + HiCache: forward {rid→host_hit_length} to PP1 so it
+                    # can match PP0's init_load_back boundary next iteration.
+                    if self.enable_hierarchical_cache:
+                        self._pp_send_pyobj_to_next_stage(
+                            self._pp_hicache_hhl_pending, async_send=True
+                        )
+                        self._pp_hicache_hhl_pending = {}
                     if self.cur_batch:
                         torch.cuda.current_stream().wait_event(self.launch_event)
                         self.send_proxy_work = self._pp_send_dict_to_next_stage(
