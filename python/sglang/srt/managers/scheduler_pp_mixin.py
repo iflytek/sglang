@@ -194,6 +194,7 @@ class SchedulerPPMixin:
         send_transfer_work = []
         send_consensus_bootstrapped_work = []
         send_release_work = []
+        send_hhl_work = []
 
         while True:
             server_is_idle = True
@@ -313,7 +314,8 @@ class SchedulerPPMixin:
                     # PP + HiCache: forward {rid→host_hit_length} to PP1 so it
                     # can match PP0's init_load_back boundary next iteration.
                     if self.enable_hierarchical_cache:
-                        self._pp_send_pyobj_to_next_stage(
+                        self._pp_commit_comm_work(send_hhl_work)
+                        send_hhl_work = self._pp_send_pyobj_to_next_stage(
                             self._pp_hicache_hhl_pending, async_send=True
                         )
                         self._pp_hicache_hhl_pending = {}
