@@ -737,7 +737,14 @@ class HiRadixCache(RadixCache):
             if not write_back:
                 # no need to lock nodes if write back
                 self.inc_lock_ref(node)
+            logger.debug(
+                f"[HiCache] write_backup success: node_id={node.id}, "
+                f"host_indices_len={len(host_indices)}"
+            )
         else:
+            logger.debug(
+                f"[HiCache] write_backup FAILED (no host memory): node_id={node.id}"
+            )
             return 0
 
         return len(host_indices)
@@ -748,7 +755,11 @@ class HiRadixCache(RadixCache):
             if self.hicache_storage_pass_prefix_keys
             else None
         )
-
+        logger.debug(
+            f"[HiCache] write_backup_storage: node_id={node.id}, "
+            f"hash_value_len={len(node.hash_value) if node.hash_value else 0}, "
+            f"host_value_len={len(node.host_value) if node.host_value is not None else 0}"
+        )
         operation_id = self.cache_controller.write_storage(
             node.host_value,
             node.key,
@@ -768,6 +779,12 @@ class HiRadixCache(RadixCache):
         if not node.backuped:
             if node.hit_count >= self.write_through_threshold:
                 # write to host if the node is not backuped
+                logger.debug(
+                    f"[HiCache] _inc_hit_count triggering write_backup: "
+                    f"node_id={node.id}, hit_count={node.hit_count}, "
+                    f"threshold={self.write_through_threshold}, "
+                    f"enable_storage={self.enable_storage}"
+                )
                 self.write_backup(node)
 
     def writing_check(self, write_back=False):
@@ -779,6 +796,9 @@ class HiRadixCache(RadixCache):
                     for ack_id in ack_list:
                         backuped_node = self.ongoing_write_through.pop(ack_id)
                         if self.enable_storage:
+                            logger.debug(
+                                f"[HiCache] writing_check(write_back) -> write_backup_storage: node_id={backuped_node.id}"
+                            )
                             self.write_backup_storage(backuped_node)
                 self.cache_controller.ack_write_queue.clear()
                 assert len(self.ongoing_write_through) == 0
@@ -794,10 +814,17 @@ class HiRadixCache(RadixCache):
                 break
             finish_count += 1
         queue_size = torch.tensor(finish_count, dtype=torch.int, device="cpu")
+        logger.debug(
+            f"[HiCache] writing_check: local_finish_count={finish_count}, "
+            f"ongoing_write_through={len(self.ongoing_write_through)}"
+        )
         # Keep cache state transitions identical across CPxTP participants.
         self._all_reduce_attn_groups(queue_size, torch.distributed.ReduceOp.MIN)
 
         finish_count = int(queue_size.item())
+        logger.debug(
+            f"[HiCache] writing_check: after all_reduce finish_count={finish_count}"
+        )
         while finish_count > 0:
             _, finish_event, ack_list = self.cache_controller.ack_write_queue.pop(0)
             finish_event.synchronize()
@@ -805,6 +832,9 @@ class HiRadixCache(RadixCache):
                 backuped_node = self.ongoing_write_through.pop(ack_id)
                 self.dec_lock_ref(backuped_node)
                 if self.enable_storage:
+                    logger.debug(
+                        f"[HiCache] writing_check -> write_backup_storage: node_id={backuped_node.id}"
+                    )
                     self.write_backup_storage(backuped_node)
             finish_count -= 1
 
