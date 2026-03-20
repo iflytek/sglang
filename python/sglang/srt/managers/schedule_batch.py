@@ -641,6 +641,12 @@ class Req(ReqDllmMixin):
         self.host_hit_length = 0
         # Tokens loaded from storage backend (L3) during prefetch for this request
         self.storage_hit_length = 0
+        # PP pipeline alignment: number of tokens PP0 actually loaded from L2
+        # host cache via init_load_back. PP0 sets this after scheduling, then
+        # writes it back into the outgoing TokenizedGenerateReqInput before
+        # forwarding to PP1. PP1 reads it as an upper-bound cap for its own
+        # init_load_back, ensuring both stages extend prefix_indices identically.
+        self.pp_load_back_len: int = 0
         # The node to lock until for swa radix tree lock ref
         self.swa_uuid_for_lock: Optional[int] = None
         # The prefix length that is inserted into the tree cache

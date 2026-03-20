@@ -293,6 +293,22 @@ class SchedulerPPMixin:
                 if tmbs[next_mb_id] is not None:
                     self.process_disagg_prefill_inflight_queue(next_release_rids)
                 if not self.pp_group.is_last_rank:
+                    # PP + HiCache L2 alignment: write pp_load_back_len from the
+                    # just-scheduled batch back into the outgoing recv_reqs so PP1
+                    # can cap its own init_load_back to the same amount.
+                    # Must happen AFTER get_new_batch_prefill (line ~227) and
+                    # BEFORE the actual send below.
+                    if self.enable_hierarchical_cache and self.mbs[mb_id] is not None:
+                        _load_back_map = {
+                            r.rid: r.pp_load_back_len
+                            for r in self.mbs[mb_id].reqs
+                            if r.pp_load_back_len > 0
+                        }
+                        if _load_back_map:
+                            for rr in recv_reqs:
+                                v = _load_back_map.get(getattr(rr, "rid", None))
+                                if v:
+                                    rr.pp_load_back_len = v
                     self.send_req_work = self._pp_send_pyobj_to_next_stage(
                         recv_reqs, async_send=True
                     )

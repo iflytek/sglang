@@ -974,7 +974,10 @@ class HiRadixCache(RadixCache):
                 heapq.heappush(eviction_heap, (new_priority, x.parent))
 
     def load_back(
-        self, node: TreeNode, mem_quota: Optional[int] = None
+        self,
+        node: TreeNode,
+        mem_quota: Optional[int] = None,
+        max_tokens: Optional[int] = None,
     ) -> Optional[torch.Tensor]:
         # todo: more loading policies
 
@@ -995,6 +998,27 @@ class HiRadixCache(RadixCache):
 
         # load it all or not at all
         host_indices = torch.cat([n.host_value for n in nodes_to_load])
+        # When max_tokens is set (PP alignment), truncate to the requested amount
+        # aligned on node boundaries. This ensures all PP stages load exactly the
+        # same number of tokens regardless of each stage's local host-tree state.
+        if max_tokens is not None and len(host_indices) > max_tokens:
+            # Trim nodes_to_load to the prefix that fits within max_tokens.
+            trimmed, total = [], 0
+            for n in nodes_to_load:
+                if total + len(n.host_value) > max_tokens:
+                    break
+                trimmed.append(n)
+                total += len(n.host_value)
+            nodes_to_load = trimmed
+            host_indices = host_indices[:total]
+            # Update last_hit_node to the deepest node actually loaded so that
+            # ongoing_load_back tracking and inc_lock_ref target the right node.
+            if nodes_to_load:
+                last_hit_node = nodes_to_load[-1]
+            else:
+                # Nothing to load after trimming (all nodes exceed max_tokens).
+                self.dec_lock_ref(ancester_node)
+                return None
         if len(host_indices) < self.load_back_threshold or (
             len(host_indices) > mem_quota + delta if mem_quota is not None else False
         ):
@@ -1036,10 +1060,11 @@ class HiRadixCache(RadixCache):
         last_node: TreeNode,
         host_hit_length: int,
         mem_quota: Optional[int] = None,
+        max_tokens: Optional[int] = None,
     ):
         _ = host_hit_length  # unused, but kept for compatibility
         if last_node.evicted:
-            loading_values = self.load_back(last_node, mem_quota)
+            loading_values = self.load_back(last_node, mem_quota, max_tokens=max_tokens)
             if loading_values is not None:
                 logger.debug(
                     f"loading back {len(loading_values)} tokens for node {last_node.id}"

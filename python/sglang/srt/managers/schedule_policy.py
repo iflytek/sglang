@@ -386,6 +386,8 @@ class PrefillAdder:
         prefill_max_requests: Optional[int] = None,
         prefill_delayer_single_pass: Optional[PrefillDelayerSinglePassExecutor] = None,
         dllm_config: Optional[DllmConfig] = None,
+        pp_rank: int = 0,
+        pp_size: int = 1,
     ):
         self.page_size = page_size
         self.tree_cache = tree_cache
@@ -395,6 +397,8 @@ class PrefillAdder:
         self.rem_input_tokens = rem_input_tokens - mixed_with_decode_tokens
         self.rem_chunk_tokens = rem_chunk_tokens
         self.dllm_config = dllm_config
+        self.pp_rank = pp_rank
+        self.pp_size = pp_size
 
         if self.dllm_config is not None:
             self._init_dllm_meta(dllm_config)
@@ -768,9 +772,58 @@ class PrefillAdder:
                 return AddReqResult.NO_TOKEN
 
             if req.host_hit_length > 0:
-                new_indices, req.last_node = self.tree_cache.init_load_back(
-                    req.last_host_node, req.host_hit_length
-                )
+                # PP pipeline alignment for L2 host cache load-back:
+                # Each PP stage has its own independent host tree. Without
+                # coordination, PP0 and PP1 may load different numbers of tokens
+                # from their respective host caches → divergent extend_input_len
+                # → hidden-state shape mismatch at PP stage boundary.
+                #
+                # Strategy:
+                # - PP0 (leader): calls init_load_back unconditionally, records
+                #   the actual number of tokens loaded into req.pp_load_back_len.
+                #   This value is forwarded to PP1 via the recv_reqs pyobj.
+                # - PP1+ (follower): calls init_load_back with max_tokens capped
+                #   to pp_load_back_len so it loads at most the same amount PP0
+                #   loaded. If PP1 has fewer tokens available locally it loads
+                #   fewer, but then max_tokens bounds it from above so it never
+                #   loads MORE than PP0. The only remaining mismatch risk is PP1
+                #   loading FEWER tokens than PP0, which is handled by PP1 still
+                #   benefitting from whatever it has locally (best-effort L2 hit).
+                #   PP0's value of 0 (from recv_reqs on PP1's first request before
+                #   PP0 has run) is safe: pp_load_back_len=0 means no cap.
+                if self.pp_size > 1 and self.pp_rank != 0:
+                    # Follower stage: cap load-back at what PP0 actually loaded.
+                    # If PP0 loaded 0 tokens, skip entirely to stay aligned.
+                    if req.pp_load_back_len > 0:
+                        new_indices, req.last_node = self.tree_cache.init_load_back(
+                            req.last_host_node,
+                            req.host_hit_length,
+                            max_tokens=req.pp_load_back_len,
+                        )
+                        # Safety: if the result length doesn't match PP0's value
+                        # (e.g. local host tree has fewer nodes, or load_back_threshold
+                        # caused a skip), extend_input_len would diverge → shape mismatch.
+                        # In that case treat as if init_load_back returned nothing.
+                        # NOTE: this cannot revert the GPU alloc when load_back succeeded
+                        # with a shorter run, but the truncation in load_back (max_tokens
+                        # cap on node boundaries) guarantees len(new_indices) is either
+                        # exactly req.pp_load_back_len or 0 (threshold skip). So the only
+                        # mismatch is the 0 case, which is safe to treat as no-op.
+                        if len(new_indices) != req.pp_load_back_len:
+                            new_indices = torch.empty(
+                                (0,), dtype=new_indices.dtype, device=new_indices.device
+                            )
+                    else:
+                        new_indices = torch.empty(
+                            (0,), dtype=torch.int64, device=self.tree_cache.device
+                        )
+                else:
+                    # Leader stage (PP0 or non-PP): load unconditionally.
+                    new_indices, req.last_node = self.tree_cache.init_load_back(
+                        req.last_host_node, req.host_hit_length
+                    )
+                    # Record the actual amount loaded for downstream PP stages.
+                    req.pp_load_back_len = len(new_indices)
                 req.prefix_indices = torch.cat([req.prefix_indices, new_indices])
                 req.set_extend_input_len(len(req.fill_ids) - len(req.prefix_indices))
                 prefix_len = len(req.prefix_indices)
