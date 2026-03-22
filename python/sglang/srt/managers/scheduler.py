@@ -2155,6 +2155,27 @@ class Scheduler(
         # Update waiting queue
         can_run_list: List[Req] = adder.can_run_list
         if len(can_run_list) == 0:
+            debug_snapshot = (
+                len(self.waiting_queue),
+                tuple(req.rid for req in self.waiting_queue[:8]),
+            )
+            if (
+                self.disaggregation_mode == DisaggregationMode.PREFILL
+                and getattr(self, "_sgl_last_prefill_batch_empty_debug", None)
+                != debug_snapshot
+            ):
+                logger.info(
+                    "Prefill batch builder found no runnable requests at PP%s ATTN_CP%s TP%s: "
+                    "waiting_queue_size=%s waiting_head=%s chunked_req=%s running_bs=%s",
+                    self.pp_rank,
+                    self.attn_cp_rank,
+                    self.attn_tp_rank,
+                    len(self.waiting_queue),
+                    [req.rid for req in self.waiting_queue[:8]],
+                    self.chunked_req.rid if self.chunked_req is not None else None,
+                    len(self.running_batch.reqs),
+                )
+                self._sgl_last_prefill_batch_empty_debug = debug_snapshot
             return None
 
         self.waiting_queue = [
@@ -2176,6 +2197,31 @@ class Scheduler(
         self.adder = adder
         self.can_run_list = can_run_list
         self.running_bs = len(self.running_batch.reqs)
+        debug_snapshot = (
+            tuple(req.rid for req in can_run_list),
+            tuple(req.rid for req in self.waiting_queue[:8]),
+            len(self.waiting_queue),
+            self.chunked_req.rid if self.chunked_req is not None else None,
+            len(self.running_batch.reqs),
+        )
+        if (
+            self.disaggregation_mode == DisaggregationMode.PREFILL
+            and getattr(self, "_sgl_last_prefill_batch_debug", None) != debug_snapshot
+        ):
+            logger.info(
+                "Prefill batch builder selected requests at PP%s ATTN_CP%s TP%s: "
+                "can_run_list=%s waiting_queue_size=%s waiting_head=%s "
+                "chunked_req=%s running_bs=%s",
+                self.pp_rank,
+                self.attn_cp_rank,
+                self.attn_tp_rank,
+                [req.rid for req in can_run_list],
+                len(self.waiting_queue),
+                [req.rid for req in self.waiting_queue[:8]],
+                self.chunked_req.rid if self.chunked_req is not None else None,
+                len(self.running_batch.reqs),
+            )
+            self._sgl_last_prefill_batch_debug = debug_snapshot
 
         set_time_batch(can_run_list, "set_forward_entry_time")
 

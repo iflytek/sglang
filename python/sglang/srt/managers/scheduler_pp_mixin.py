@@ -734,6 +734,28 @@ class SchedulerPPMixin:
                 )
             )
             self.waiting_queue.extend(good_reqs)
+            debug_snapshot = (
+                tuple(good_consensus_bootstrapped_rids),
+                tuple(bad_consensus_bootstrapped_rids),
+                tuple(req.rid for req in good_reqs),
+                tuple(req.rid for req in failed_reqs),
+                len(self.waiting_queue),
+            )
+            if getattr(self, "_sgl_last_pp_bootstrap_queue_debug", None) != debug_snapshot:
+                logger.info(
+                    "PP bootstrap queue processed at PP%s ATTN_CP%s TP%s: "
+                    "consensus_good=%s consensus_bad=%s moved_to_waiting=%s "
+                    "failed=%s waiting_queue_size=%s",
+                    self.pp_rank,
+                    self.attn_cp_rank,
+                    self.attn_tp_rank,
+                    good_consensus_bootstrapped_rids,
+                    bad_consensus_bootstrapped_rids,
+                    [req.rid for req in good_reqs],
+                    [req.rid for req in failed_reqs],
+                    len(self.waiting_queue),
+                )
+                self._sgl_last_pp_bootstrap_queue_debug = debug_snapshot
             return [[req.rid for req in good_reqs], [req.rid for req in failed_reqs]]
         return None
 
@@ -756,9 +778,29 @@ class SchedulerPPMixin:
         for req in req_queue:
             if req.rid not in candidate_rids_set:
                 continue
-            if self.tree_cache.check_prefetch_progress(req.rid):
+            if getattr(
+                self.tree_cache,
+                "is_prefetch_ready_for_bootstrap",
+                self.tree_cache.check_prefetch_progress,
+            )(req.rid):
                 ready_rids.add(req.rid)
-        return [rid for rid in candidate_rids if rid in ready_rids]
+        filtered_rids = [rid for rid in candidate_rids if rid in ready_rids]
+        debug_snapshot = (
+            tuple(candidate_rids),
+            tuple(filtered_rids),
+        )
+        if getattr(self, "_sgl_last_pp_prefetch_filter_debug", None) != debug_snapshot:
+            logger.info(
+                "PP bootstrap prefetch filter at PP%s ATTN_CP%s TP%s: "
+                "candidate_rids=%s ready_rids=%s",
+                self.pp_rank,
+                self.attn_cp_rank,
+                self.attn_tp_rank,
+                candidate_rids,
+                filtered_rids,
+            )
+            self._sgl_last_pp_prefetch_filter_debug = debug_snapshot
+        return filtered_rids
 
     def _pp_pd_get_bootstrapped_ids(self: Scheduler):
         # communicate pre-consensus bootstrapp reqs
@@ -797,6 +839,22 @@ class SchedulerPPMixin:
             bad_bootstrapped_rids = list(
                 set(prev_bad_bootstrapped_rids) | set(curr_bad_bootstrapped_rids)
             )
+        debug_snapshot = (
+            tuple(good_bootstrapped_rids),
+            tuple(bad_bootstrapped_rids),
+        )
+        if getattr(self, "_sgl_last_pp_bootstrapped_ids_debug", None) != debug_snapshot:
+            logger.info(
+                "PP bootstrapped ids at PP%s ATTN_CP%s TP%s: "
+                "consensus_good=%s consensus_bad=%s bootstrap_queue_size=%s",
+                self.pp_rank,
+                self.attn_cp_rank,
+                self.attn_tp_rank,
+                good_bootstrapped_rids,
+                bad_bootstrapped_rids,
+                len(self.disagg_prefill_bootstrap_queue.queue),
+            )
+            self._sgl_last_pp_bootstrapped_ids_debug = debug_snapshot
         return [good_bootstrapped_rids, bad_bootstrapped_rids]
 
     def _pp_pd_get_prefill_transferred_ids(self: Scheduler):
@@ -822,6 +880,18 @@ class SchedulerPPMixin:
             transferred_rids = list(
                 set(prev_transferred_rids) & set(curr_transferred_rids)
             )
+        debug_snapshot = tuple(transferred_rids)
+        if getattr(self, "_sgl_last_pp_transferred_ids_debug", None) != debug_snapshot:
+            logger.info(
+                "PP transferred ids at PP%s ATTN_CP%s TP%s: "
+                "consensus_transferred=%s inflight_queue_size=%s",
+                self.pp_rank,
+                self.attn_cp_rank,
+                self.attn_tp_rank,
+                transferred_rids,
+                len(self.disagg_prefill_inflight_queue),
+            )
+            self._sgl_last_pp_transferred_ids_debug = debug_snapshot
         return transferred_rids
 
     def _pp_pd_send_consensus_bootstrapped_ids(

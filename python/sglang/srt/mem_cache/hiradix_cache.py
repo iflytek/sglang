@@ -1147,6 +1147,23 @@ class HiRadixCache(RadixCache):
         can_terminate = can_terminate or operation_terminated
         return can_terminate
 
+    def is_prefetch_ready_for_bootstrap(self, req_id: str) -> bool:
+        """Check whether a prefetch can advance PP bootstrap without finalizing it.
+
+        This probe keeps the bootstrap consensus aligned across PP ranks while
+        avoiding host-tree mutation in the bootstrap path. Actual prefetch
+        finalization still happens later in `check_prefetch_progress()` when the
+        request is staged from the waiting queue.
+        """
+        if req_id not in self.ongoing_prefetch:
+            return True
+
+        _, _, _, operation = self.ongoing_prefetch[req_id]
+        if operation.host_indices is None:
+            return True
+
+        return self.can_terminate_prefetch(operation)
+
     def check_prefetch_progress(self, req_id: str) -> bool:
         if req_id not in self.ongoing_prefetch:
             # there is no ongoing prefetch for this request or it has been revoked
