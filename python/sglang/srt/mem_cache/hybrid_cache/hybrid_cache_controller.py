@@ -518,15 +518,38 @@ class HybridCacheController(BaseHiCacheController):
 
     def get_usable_prefetch_token_count(self, operation: PrefetchOperation) -> int:
         usable_pages = operation.completed_tokens // self.page_size
+        pool_debug = []
         for transfer in operation.pool_transfers or []:
             if transfer.hit_policy != PoolHitPolicy.ALL_PAGES:
                 continue
+            pool_name = _pool_name_key(transfer.name)
+            pool_hit_pages = operation.pool_storage_result.extra_pool_hit_pages.get(
+                pool_name, 0
+            )
+            pool_debug.append(
+                f"{pool_name}:hit_policy={transfer.hit_policy.name},hit_pages={pool_hit_pages}"
+            )
             usable_pages = min(
                 usable_pages,
-                operation.pool_storage_result.extra_pool_hit_pages.get(
-                    _pool_name_key(transfer.name), 0
-                ),
+                pool_hit_pages,
             )
+        debug_snapshot = (
+            operation.request_id,
+            operation.completed_tokens,
+            usable_pages,
+            tuple(pool_debug),
+        )
+        if getattr(operation, "_sgl_last_usable_debug", None) != debug_snapshot:
+            logger.info(
+                "HiCache usable prefetch tokens for req %s: completed_tokens=%s "
+                "usable_pages=%s usable_tokens=%s extra_pools=[%s]",
+                operation.request_id,
+                operation.completed_tokens,
+                usable_pages,
+                usable_pages * self.page_size,
+                ", ".join(pool_debug) if pool_debug else "none",
+            )
+            operation._sgl_last_usable_debug = debug_snapshot
         return usable_pages * self.page_size
 
     def _resolve_pool_transfers_allocation(
