@@ -490,6 +490,35 @@ class HybridCacheController(BaseHiCacheController):
             )
         return materialized
 
+    def _summarize_transfer(self, transfer: PoolTransfer) -> str:
+        host_items = (
+            int(transfer.host_indices.numel()) if transfer.host_indices is not None else 0
+        )
+        device_items = (
+            int(transfer.device_indices.numel())
+            if transfer.device_indices is not None
+            else 0
+        )
+        key_count = len(transfer.keys or [])
+        first_key = (transfer.keys or [None])[0]
+        first_key_prefix = first_key[:16] if first_key else "none"
+        return (
+            f"{_pool_name_key(transfer.name)}:"
+            f"hit_policy={transfer.hit_policy.name},"
+            f"keys={key_count},"
+            f"host_items={host_items},"
+            f"device_items={device_items},"
+            f"anchor_host={transfer.use_anchor_host_indices},"
+            f"anchor_device={transfer.use_anchor_device_indices},"
+            f"first_key={first_key_prefix}"
+        )
+
+    def _count_consecutive_true(self, results: list[bool]) -> int:
+        for i, ok in enumerate(results):
+            if not ok:
+                return i
+        return len(results)
+
     def _page_transfer(self, operation):
         super()._page_transfer(operation)
         kv_pages = operation.completed_tokens // self.page_size
@@ -501,6 +530,22 @@ class HybridCacheController(BaseHiCacheController):
         )
         if transfers and not operation.is_terminated():
             results = self.storage_backend.batch_get_v2(transfers)
+            transfer_debug = [self._summarize_transfer(transfer) for transfer in transfers]
+            result_debug = {
+                name: self._count_consecutive_true(pool_results)
+                for name, pool_results in results.items()
+            }
+            logger.info(
+                "HiCache extra pool batch_get for req %s: pp_rank=%s attn_cp_rank=%s "
+                "tp_rank=%s kv_pages=%s transfers=[%s] consecutive_hits=%s",
+                operation.request_id,
+                self.pp_rank,
+                self.attn_cp_rank,
+                self.tp_rank,
+                kv_pages,
+                "; ".join(transfer_debug),
+                result_debug,
+            )
             operation.pool_storage_result.update_extra_pool_hit_pages(results)
 
     def _page_backup(self, operation):
@@ -519,6 +564,7 @@ class HybridCacheController(BaseHiCacheController):
     def get_usable_prefetch_token_count(self, operation: PrefetchOperation) -> int:
         usable_pages = operation.completed_tokens // self.page_size
         pool_debug = []
+        zero_hit_pools = []
         for transfer in operation.pool_transfers or []:
             if transfer.hit_policy != PoolHitPolicy.ALL_PAGES:
                 continue
@@ -529,6 +575,8 @@ class HybridCacheController(BaseHiCacheController):
             pool_debug.append(
                 f"{pool_name}:hit_policy={transfer.hit_policy.name},hit_pages={pool_hit_pages}"
             )
+            if pool_hit_pages == 0:
+                zero_hit_pools.append(self._summarize_transfer(transfer))
             usable_pages = min(
                 usable_pages,
                 pool_hit_pages,
@@ -550,6 +598,20 @@ class HybridCacheController(BaseHiCacheController):
                 ", ".join(pool_debug) if pool_debug else "none",
             )
             operation._sgl_last_usable_debug = debug_snapshot
+        if usable_pages == 0 and operation.completed_tokens > 0:
+            logger.warning(
+                "HiCache usable prefetch tokens collapsed to zero for req %s: "
+                "pp_rank=%s attn_cp_rank=%s tp_rank=%s completed_tokens=%s kv_hit_pages=%s "
+                "extra_pool_hit_pages=%s zero_hit_pools=[%s]",
+                operation.request_id,
+                self.pp_rank,
+                self.attn_cp_rank,
+                self.tp_rank,
+                operation.completed_tokens,
+                operation.pool_storage_result.kv_hit_pages,
+                operation.pool_storage_result.extra_pool_hit_pages,
+                "; ".join(zero_hit_pools) if zero_hit_pools else "none",
+            )
         return usable_pages * self.page_size
 
     def _resolve_pool_transfers_allocation(

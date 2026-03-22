@@ -127,6 +127,7 @@ class HiRadixCache(RadixCache):
         self.tp_group = params.tp_cache_group
         self.attn_cp_group = params.attn_cp_cache_group
         self.attn_tp_group = params.attn_tp_cache_group
+        self.pp_group = params.pp_cache_group
         self.tp_world_size = torch.distributed.get_world_size(group=self.tp_group)
         self.pp_rank = params.pp_rank
         self.pp_size = params.pp_size
@@ -1203,6 +1204,21 @@ class HiRadixCache(RadixCache):
         self._all_reduce_attn_groups(
             completed_tokens_tensor, torch.distributed.ReduceOp.MIN
         )
+        if self.pp_size > 1 and self.pp_group is not None:
+            local_completed_tokens = int(completed_tokens_tensor.item())
+            torch.distributed.all_reduce(
+                completed_tokens_tensor,
+                op=torch.distributed.ReduceOp.MIN,
+                group=self.pp_group,
+            )
+            if int(completed_tokens_tensor.item()) != local_completed_tokens:
+                logger.info(
+                    "HiCache prefetch align across PP stages for req %s: "
+                    "local_usable_tokens=%s pp_aligned_usable_tokens=%s",
+                    req_id,
+                    local_completed_tokens,
+                    int(completed_tokens_tensor.item()),
+                )
         min_completed_tokens = completed_tokens_tensor.item()
         fetched_token_ids = token_ids[:min_completed_tokens]
         written_indices = host_indices[:min_completed_tokens]
