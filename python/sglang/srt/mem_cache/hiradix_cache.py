@@ -1121,7 +1121,7 @@ class HiRadixCache(RadixCache):
 
         if self.use_nsa_pool_controller:
             extra_pool_ready = getattr(
-                operation, "is_extra_pool_result_ready", lambda: True
+                operation, "is_prefetch_result_ready", lambda: True
             )()
 
         if self.prefetch_stop_policy == "wait_complete":
@@ -1200,7 +1200,7 @@ class HiRadixCache(RadixCache):
                         "extra_pool_ready=%s extra_pool_hit_pages=%s",
                         req_id,
                         getattr(
-                            operation, "is_extra_pool_result_ready", lambda: True
+                            operation, "is_prefetch_result_ready", lambda: True
                         )(),
                         getattr(
                             operation,

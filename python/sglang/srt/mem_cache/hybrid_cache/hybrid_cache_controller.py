@@ -132,7 +132,8 @@ class PrefetchOperation(StorageOperation):
         self.request_id = request_id
         self._lock = threading.Lock()
         self._terminated_flag = False
-        self._extra_pool_result_ready = not pool_transfers
+        self._prefetch_result_ready = False
+        self._published_usable_tokens = 0
         self.start_time = time.monotonic()
         super().__init__(
             host_indices,
@@ -156,18 +157,24 @@ class PrefetchOperation(StorageOperation):
     def is_terminated(self) -> bool:
         return self._terminated_flag
 
-    def set_extra_pool_results(self, results: dict[str, list[bool]]) -> None:
+    def publish_prefetch_result(
+        self,
+        usable_tokens: int,
+        extra_pool_results: Optional[dict[str, list[bool]]] = None,
+    ) -> None:
         with self._lock:
-            self.pool_storage_result.update_extra_pool_hit_pages(results)
-            self._extra_pool_result_ready = True
+            if extra_pool_results is not None:
+                self.pool_storage_result.update_extra_pool_hit_pages(extra_pool_results)
+            self._published_usable_tokens = usable_tokens
+            self._prefetch_result_ready = True
 
-    def mark_extra_pool_result_ready(self) -> None:
+    def is_prefetch_result_ready(self) -> bool:
         with self._lock:
-            self._extra_pool_result_ready = True
+            return self._prefetch_result_ready
 
-    def is_extra_pool_result_ready(self) -> bool:
+    def get_published_usable_tokens(self) -> int:
         with self._lock:
-            return self._extra_pool_result_ready
+            return self._published_usable_tokens
 
     def get_extra_pool_hit_pages(self, pool_name: str) -> int:
         with self._lock:
@@ -541,6 +548,31 @@ class HybridCacheController(BaseHiCacheController):
                 return i
         return len(results)
 
+    def _compute_usable_tokens_from_hits(
+        self,
+        operation: PrefetchOperation,
+        extra_pool_hit_pages: Optional[dict[str, int]] = None,
+    ) -> tuple[int, list[str], list[str]]:
+        usable_pages = operation.completed_tokens // self.page_size
+        pool_debug = []
+        zero_hit_pools = []
+        extra_pool_hit_pages = extra_pool_hit_pages or {}
+        for transfer in operation.pool_transfers or []:
+            if transfer.hit_policy != PoolHitPolicy.ALL_PAGES:
+                continue
+            pool_name = _pool_name_key(transfer.name)
+            pool_hit_pages = extra_pool_hit_pages.get(pool_name, 0)
+            pool_debug.append(
+                f"{pool_name}:hit_policy={transfer.hit_policy.name},hit_pages={pool_hit_pages}"
+            )
+            if pool_hit_pages == 0:
+                zero_hit_pools.append(self._summarize_transfer(transfer))
+            usable_pages = min(
+                usable_pages,
+                pool_hit_pages,
+            )
+        return usable_pages * self.page_size, pool_debug, zero_hit_pools
+
     def _page_transfer(self, operation):
         super()._page_transfer(operation)
         kv_pages = operation.completed_tokens // self.page_size
@@ -557,9 +589,18 @@ class HybridCacheController(BaseHiCacheController):
                 name: self._count_consecutive_true(pool_results)
                 for name, pool_results in results.items()
             }
+            usable_tokens, _, _ = self._compute_usable_tokens_from_hits(
+                operation,
+                extra_pool_hit_pages=result_debug,
+            )
+            operation.publish_prefetch_result(
+                usable_tokens=usable_tokens,
+                extra_pool_results=results,
+            )
             logger.info(
                 "HiCache extra pool batch_get for req %s: pp_rank=%s attn_cp_rank=%s "
-                "tp_rank=%s kv_pages=%s transfers=[%s] consecutive_hits=%s",
+                "tp_rank=%s kv_pages=%s transfers=[%s] consecutive_hits=%s "
+                "published_usable_tokens=%s",
                 operation.request_id,
                 self.pp_rank,
                 self.attn_cp_rank,
@@ -567,10 +608,10 @@ class HybridCacheController(BaseHiCacheController):
                 kv_pages,
                 "; ".join(transfer_debug),
                 result_debug,
+                usable_tokens,
             )
-            operation.set_extra_pool_results(results)
         elif not transfers:
-            operation.mark_extra_pool_result_ready()
+            operation.publish_prefetch_result(usable_tokens=operation.completed_tokens)
 
     def _page_backup(self, operation):
         super()._page_backup(operation)
@@ -586,27 +627,15 @@ class HybridCacheController(BaseHiCacheController):
             operation.pool_storage_result.update_extra_pool_hit_pages(results)
 
     def get_usable_prefetch_token_count(self, operation: PrefetchOperation) -> int:
-        usable_pages = operation.completed_tokens // self.page_size
-        pool_debug = []
-        zero_hit_pools = []
-        for transfer in operation.pool_transfers or []:
-            if transfer.hit_policy != PoolHitPolicy.ALL_PAGES:
-                continue
-            pool_name = _pool_name_key(transfer.name)
-            pool_hit_pages = operation.get_extra_pool_hit_pages(pool_name)
-            pool_debug.append(
-                f"{pool_name}:hit_policy={transfer.hit_policy.name},hit_pages={pool_hit_pages}"
-            )
-            if pool_hit_pages == 0:
-                zero_hit_pools.append(self._summarize_transfer(transfer))
-            usable_pages = min(
-                usable_pages,
-                pool_hit_pages,
-            )
+        usable_tokens = operation.get_published_usable_tokens()
+        _, pool_debug, zero_hit_pools = self._compute_usable_tokens_from_hits(
+            operation,
+            extra_pool_hit_pages=operation.snapshot_extra_pool_hit_pages(),
+        )
         debug_snapshot = (
             operation.request_id,
             operation.completed_tokens,
-            usable_pages,
+            usable_tokens,
             tuple(pool_debug),
         )
         if getattr(operation, "_sgl_last_usable_debug", None) != debug_snapshot:
@@ -615,12 +644,12 @@ class HybridCacheController(BaseHiCacheController):
                 "usable_pages=%s usable_tokens=%s extra_pools=[%s]",
                 operation.request_id,
                 operation.completed_tokens,
-                usable_pages,
-                usable_pages * self.page_size,
+                usable_tokens // self.page_size,
+                usable_tokens,
                 ", ".join(pool_debug) if pool_debug else "none",
             )
             operation._sgl_last_usable_debug = debug_snapshot
-        if usable_pages == 0 and operation.completed_tokens > 0:
+        if usable_tokens == 0 and operation.completed_tokens > 0:
             logger.warning(
                 "HiCache usable prefetch tokens collapsed to zero for req %s: "
                 "pp_rank=%s attn_cp_rank=%s tp_rank=%s completed_tokens=%s kv_hit_pages=%s "
@@ -634,7 +663,7 @@ class HybridCacheController(BaseHiCacheController):
                 operation.snapshot_extra_pool_hit_pages(),
                 "; ".join(zero_hit_pools) if zero_hit_pools else "none",
             )
-        return usable_pages * self.page_size
+        return usable_tokens
 
     def _resolve_pool_transfers_allocation(
         self,
