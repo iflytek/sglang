@@ -127,7 +127,6 @@ class HiRadixCache(RadixCache):
         self.tp_group = params.tp_cache_group
         self.attn_cp_group = params.attn_cp_cache_group
         self.attn_tp_group = params.attn_tp_cache_group
-        self.pp_group = params.pp_cache_group
         self.tp_world_size = torch.distributed.get_world_size(group=self.tp_group)
         self.pp_rank = params.pp_rank
         self.pp_size = params.pp_size
@@ -1108,6 +1107,7 @@ class HiRadixCache(RadixCache):
 
     def can_terminate_prefetch(self, operation: PrefetchOperation):
         can_terminate = True
+        extra_pool_ready = True
 
         if self.prefetch_stop_policy == "best_effort":
             return can_terminate
@@ -1119,10 +1119,17 @@ class HiRadixCache(RadixCache):
                 operation.completed_tokens == len(operation.hash_value) * self.page_size
             )
 
+        if self.use_nsa_pool_controller:
+            extra_pool_ready = getattr(
+                operation, "is_extra_pool_result_ready", lambda: True
+            )()
+
         if self.prefetch_stop_policy == "wait_complete":
-            can_terminate = completed
+            can_terminate = completed and extra_pool_ready
         elif self.prefetch_stop_policy == "timeout":
-            can_terminate = completed or self.is_prefetch_timeout(operation)
+            can_terminate = (completed and extra_pool_ready) or self.is_prefetch_timeout(
+                operation
+            )
         else:
             # unknown prefetch stop policy, just return True
             return True
@@ -1170,6 +1177,20 @@ class HiRadixCache(RadixCache):
                     operation.is_terminated(),
                     self.prefetch_stop_policy,
                 )
+                if self.use_nsa_pool_controller:
+                    logger.info(
+                        "HiCache prefetch extra pool status for req %s: "
+                        "extra_pool_ready=%s extra_pool_hit_pages=%s",
+                        req_id,
+                        getattr(
+                            operation, "is_extra_pool_result_ready", lambda: True
+                        )(),
+                        getattr(
+                            operation,
+                            "snapshot_extra_pool_hit_pages",
+                            lambda: {},
+                        )(),
+                    )
                 operation._sgl_logged_prefetch_wait = True
             return False
 
@@ -1204,21 +1225,6 @@ class HiRadixCache(RadixCache):
         self._all_reduce_attn_groups(
             completed_tokens_tensor, torch.distributed.ReduceOp.MIN
         )
-        if self.pp_size > 1 and self.pp_group is not None:
-            local_completed_tokens = int(completed_tokens_tensor.item())
-            torch.distributed.all_reduce(
-                completed_tokens_tensor,
-                op=torch.distributed.ReduceOp.MIN,
-                group=self.pp_group,
-            )
-            if int(completed_tokens_tensor.item()) != local_completed_tokens:
-                logger.info(
-                    "HiCache prefetch align across PP stages for req %s: "
-                    "local_usable_tokens=%s pp_aligned_usable_tokens=%s",
-                    req_id,
-                    local_completed_tokens,
-                    int(completed_tokens_tensor.item()),
-                )
         min_completed_tokens = completed_tokens_tensor.item()
         fetched_token_ids = token_ids[:min_completed_tokens]
         written_indices = host_indices[:min_completed_tokens]

@@ -132,6 +132,7 @@ class PrefetchOperation(StorageOperation):
         self.request_id = request_id
         self._lock = threading.Lock()
         self._terminated_flag = False
+        self._extra_pool_result_ready = not pool_transfers
         self.start_time = time.monotonic()
         super().__init__(
             host_indices,
@@ -154,6 +155,27 @@ class PrefetchOperation(StorageOperation):
 
     def is_terminated(self) -> bool:
         return self._terminated_flag
+
+    def set_extra_pool_results(self, results: dict[str, list[bool]]) -> None:
+        with self._lock:
+            self.pool_storage_result.update_extra_pool_hit_pages(results)
+            self._extra_pool_result_ready = True
+
+    def mark_extra_pool_result_ready(self) -> None:
+        with self._lock:
+            self._extra_pool_result_ready = True
+
+    def is_extra_pool_result_ready(self) -> bool:
+        with self._lock:
+            return self._extra_pool_result_ready
+
+    def get_extra_pool_hit_pages(self, pool_name: str) -> int:
+        with self._lock:
+            return self.pool_storage_result.extra_pool_hit_pages.get(pool_name, 0)
+
+    def snapshot_extra_pool_hit_pages(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self.pool_storage_result.extra_pool_hit_pages)
 
 
 class HybridCacheController(BaseHiCacheController):
@@ -546,7 +568,9 @@ class HybridCacheController(BaseHiCacheController):
                 "; ".join(transfer_debug),
                 result_debug,
             )
-            operation.pool_storage_result.update_extra_pool_hit_pages(results)
+            operation.set_extra_pool_results(results)
+        elif not transfers:
+            operation.mark_extra_pool_result_ready()
 
     def _page_backup(self, operation):
         super()._page_backup(operation)
@@ -569,9 +593,7 @@ class HybridCacheController(BaseHiCacheController):
             if transfer.hit_policy != PoolHitPolicy.ALL_PAGES:
                 continue
             pool_name = _pool_name_key(transfer.name)
-            pool_hit_pages = operation.pool_storage_result.extra_pool_hit_pages.get(
-                pool_name, 0
-            )
+            pool_hit_pages = operation.get_extra_pool_hit_pages(pool_name)
             pool_debug.append(
                 f"{pool_name}:hit_policy={transfer.hit_policy.name},hit_pages={pool_hit_pages}"
             )
@@ -609,7 +631,7 @@ class HybridCacheController(BaseHiCacheController):
                 self.tp_rank,
                 operation.completed_tokens,
                 operation.pool_storage_result.kv_hit_pages,
-                operation.pool_storage_result.extra_pool_hit_pages,
+                operation.snapshot_extra_pool_hit_pages(),
                 "; ".join(zero_hit_pools) if zero_hit_pools else "none",
             )
         return usable_pages * self.page_size
