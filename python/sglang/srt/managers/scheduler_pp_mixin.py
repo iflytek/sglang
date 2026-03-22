@@ -737,6 +737,29 @@ class SchedulerPPMixin:
             return [[req.rid for req in good_reqs], [req.rid for req in failed_reqs]]
         return None
 
+    def _pp_filter_bootstrapped_rids_by_prefetch(
+        self: Scheduler, req_queue: List[Req], candidate_rids: List[str]
+    ) -> List[str]:
+        """Only advance bootstrap consensus once local HiCache prefetch is ready.
+
+        In non-PP mode, a request can sit in waiting_queue until prefetch completes.
+        In PP mode, however, downstream stages may already form a batch and block on
+        proxy recv while upstream stages are still waiting for prefetch completion.
+        Filtering bootstrap consensus by local prefetch readiness keeps stage
+        progression aligned across PP ranks.
+        """
+        if not self.enable_hicache_storage or not candidate_rids:
+            return candidate_rids
+
+        candidate_rids_set = set(candidate_rids)
+        ready_rids = set()
+        for req in req_queue:
+            if req.rid not in candidate_rids_set:
+                continue
+            if self.tree_cache.check_prefetch_progress(req.rid):
+                ready_rids.add(req.rid)
+        return [rid for rid in candidate_rids if rid in ready_rids]
+
     def _pp_pd_get_bootstrapped_ids(self: Scheduler):
         # communicate pre-consensus bootstrapp reqs
         if self.pp_group.is_first_rank:
@@ -746,6 +769,9 @@ class SchedulerPPMixin:
                 True,
                 [KVPoll.WaitingForInput],
                 [KVPoll.Failed],
+            )
+            good_bootstrapped_rids = self._pp_filter_bootstrapped_rids_by_prefetch(
+                self.disagg_prefill_bootstrap_queue.queue, good_bootstrapped_rids
             )
         else:
             # Other ranks, receive the bootstrap reqs info from the previous rank and ensure the consensus
@@ -758,6 +784,12 @@ class SchedulerPPMixin:
                 True,
                 [KVPoll.WaitingForInput],
                 [KVPoll.Failed],
+            )
+            curr_good_bootstrapped_rids = (
+                self._pp_filter_bootstrapped_rids_by_prefetch(
+                    self.disagg_prefill_bootstrap_queue.queue,
+                    curr_good_bootstrapped_rids,
+                )
             )
             good_bootstrapped_rids = list(
                 set(prev_good_bootstrapped_rids) & set(curr_good_bootstrapped_rids)

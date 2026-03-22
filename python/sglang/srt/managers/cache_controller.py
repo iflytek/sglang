@@ -232,8 +232,25 @@ class PrefetchOperation(StorageOperation):
     def increment(self, num_tokens: int):
         with self._lock:
             if self._terminated_flag:
+                logger.info(
+                    "HiCache prefetch increment skipped for req %s: num_tokens=%s "
+                    "completed_tokens=%s terminated=%s",
+                    self.request_id,
+                    num_tokens,
+                    self.completed_tokens,
+                    self._terminated_flag,
+                )
                 return False
+            prev_completed_tokens = self.completed_tokens
             self.completed_tokens += num_tokens
+            logger.info(
+                "HiCache prefetch increment for req %s: num_tokens=%s "
+                "completed_tokens=%s->%s",
+                self.request_id,
+                num_tokens,
+                prev_completed_tokens,
+                self.completed_tokens,
+            )
             return True
 
     def mark_terminate(self):
@@ -927,12 +944,37 @@ class HiCacheController:
             prev_completed_tokens = operation.completed_tokens
             # Get one batch token, and update the completed_tokens if succeed
             extra_info = HiCacheStorageExtraInfo(prefix_keys=prefix_keys)
+            logger.info(
+                "HiCache page transfer start for req %s: batch_idx=%s batch_pages=%s "
+                "prev_completed_tokens=%s total_pages=%s",
+                operation.request_id,
+                i // self.storage_batch_size,
+                len(batch_hashes),
+                prev_completed_tokens,
+                len(operation.hash_value),
+            )
             self.page_get_func(operation, batch_hashes, batch_host_indices, extra_info)
+            logger.info(
+                "HiCache page transfer finish for req %s: batch_idx=%s "
+                "completed_tokens=%s expected_completed_tokens=%s",
+                operation.request_id,
+                i // self.storage_batch_size,
+                operation.completed_tokens,
+                prev_completed_tokens + len(batch_hashes) * self.page_size,
+            )
             # Check termination
             if (
                 operation.completed_tokens
                 != prev_completed_tokens + len(batch_hashes) * self.page_size
             ):
+                logger.info(
+                    "HiCache page transfer marking terminate for req %s: batch_idx=%s "
+                    "completed_tokens=%s expected_completed_tokens=%s",
+                    operation.request_id,
+                    i // self.storage_batch_size,
+                    operation.completed_tokens,
+                    prev_completed_tokens + len(batch_hashes) * self.page_size,
+                )
                 operation.mark_terminate()
                 break  # Some operations fail or operation terminated by controller
 
