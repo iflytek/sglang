@@ -2107,12 +2107,29 @@ class Scheduler(
             if self.enable_hicache_storage:
                 prefetch_done = self.tree_cache.check_prefetch_progress(req.rid)
                 if not prefetch_done:
+                    if not getattr(req, "_sgl_logged_prefetch_wait", False):
+                        logger.info(
+                            "HiCache prefetch still in progress for req %s; "
+                            "skip staging this round. host_hit_length=%s storage_hit_length=%s",
+                            req.rid,
+                            req.host_hit_length,
+                            req.storage_hit_length,
+                        )
+                        req._sgl_logged_prefetch_wait = True
                     # skip staging requests that are ongoing prefetch
                     continue
                 # Pop the number of tokens loaded from storage (L3 hits)
                 req.storage_hit_length = self.tree_cache.pop_prefetch_loaded_tokens(
                     req.rid
                 )
+                if getattr(req, "_sgl_logged_prefetch_wait", False):
+                    logger.info(
+                        "HiCache prefetch became ready for req %s; continue staging. "
+                        "storage_hit_length=%s",
+                        req.rid,
+                        req.storage_hit_length,
+                    )
+                    req._sgl_logged_prefetch_wait = False
 
             req.init_next_round_input(self.tree_cache)
             res = adder.add_one_req(

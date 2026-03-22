@@ -1154,7 +1154,22 @@ class HiRadixCache(RadixCache):
             # prefetch has not been issued due to insufficient host memory
             return True
 
-        if not self.can_terminate_prefetch(operation):
+        can_terminate = self.can_terminate_prefetch(operation)
+        if not can_terminate:
+            if not getattr(operation, "_sgl_logged_prefetch_wait", False):
+                logger.info(
+                    "HiCache prefetch waiting for req %s: completed_tokens=%s "
+                    "planned_tokens=%s page_size=%s hash_pages=%s terminated=%s "
+                    "stop_policy=%s",
+                    req_id,
+                    operation.completed_tokens,
+                    len(operation.hash_value) * self.page_size,
+                    self.page_size,
+                    len(operation.hash_value),
+                    operation.is_terminated(),
+                    self.prefetch_stop_policy,
+                )
+                operation._sgl_logged_prefetch_wait = True
             return False
 
         completed_tokens, hash_value = self.cache_controller.terminate_prefetch(
@@ -1166,6 +1181,22 @@ class HiRadixCache(RadixCache):
         if self.use_nsa_pool_controller:
             min_completed_tokens = (
                 self.cache_controller.get_usable_prefetch_token_count(operation)
+            )
+            logger.info(
+                "HiCache prefetch terminate for req %s with NSA pool: "
+                "completed_tokens=%s usable_tokens=%s hash_pages=%s",
+                req_id,
+                completed_tokens,
+                min_completed_tokens,
+                len(hash_value),
+            )
+        else:
+            logger.info(
+                "HiCache prefetch terminate for req %s: completed_tokens=%s "
+                "hash_pages=%s",
+                req_id,
+                completed_tokens,
+                len(hash_value),
             )
         # Synchronize workers before mutating host cache tree state.
         completed_tokens_tensor = torch.tensor(min_completed_tokens, dtype=torch.int)
@@ -1195,6 +1226,15 @@ class HiRadixCache(RadixCache):
         # Track tokens actually loaded from storage for this request (L3 hits)
         loaded_from_storage = min_completed_tokens - matched_length
         self.prefetch_loaded_tokens_by_reqid[req_id] = loaded_from_storage
+        logger.info(
+            "HiCache prefetch finalized for req %s: min_completed_tokens=%s "
+            "matched_length=%s loaded_from_storage=%s completed_tokens=%s",
+            req_id,
+            min_completed_tokens,
+            matched_length,
+            loaded_from_storage,
+            completed_tokens,
+        )
 
         if self.enable_storage_metrics:
             self.storage_metrics_collector.log_prefetched_tokens(loaded_from_storage)
