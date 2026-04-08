@@ -2199,6 +2199,18 @@ class HiRadixCache(RadixCache):
 
         return False
 
+    def _pp_event_blocks_prefetch_progress(
+        self, event: PPHostTreeEvent, req_id: str
+    ) -> bool:
+        # Request-scoped PP events should only block the matching request. Global
+        # structural events are handled by dedicated scheduler barriers instead of
+        # stalling unrelated requests here.
+        if event.kind == "WRITE_BACKUP_COMMITTED":
+            return False
+        if event.kind in ("PREFETCH_SKIP", "REVOKE", "PREFETCH_FINALIZE"):
+            return event.rid == req_id
+        return True
+
     def get_height(self, node: TreeNode):
         height = 0
         while node != self.root_node:
@@ -2775,26 +2787,10 @@ class HiRadixCache(RadixCache):
                     return True
             event = self._peek_pp_host_tree_event()
             if event is not None:
-                if event.kind == "WRITE_BACKUP_COMMITTED":
+                if self._pp_event_blocks_prefetch_progress(event, req_id):
                     if self._hicache_verbose_enabled():
                         logger.warning(
-                            "[HiCachePrefetchWaitPass] rid=%s reason=unrelated_write_backup_pending event_seq=%s",
-                            req_id,
-                            event.seq,
-                        )
-                elif event.kind != "PREFETCH_FINALIZE":
-                    if self._hicache_verbose_enabled():
-                        logger.warning(
-                            "[HiCachePrefetchWaitBlocked] rid=%s reason=pending_pp_event event_kind=%s event_rid=%s",
-                            req_id,
-                            event.kind,
-                            event.rid,
-                        )
-                    return False
-                if event.rid == req_id:
-                    if self._hicache_verbose_enabled():
-                        logger.warning(
-                            "[HiCachePrefetchWaitBlocked] rid=%s reason=matching_prefetch_finalize_pending event_kind=%s event_rid=%s",
+                            "[HiCachePrefetchWaitBlocked] rid=%s reason=matching_pp_event event_kind=%s event_rid=%s",
                             req_id,
                             event.kind,
                             event.rid,
@@ -2802,9 +2798,11 @@ class HiRadixCache(RadixCache):
                     return False
                 if self._hicache_verbose_enabled():
                     logger.warning(
-                        "[HiCachePrefetchWaitPass] rid=%s reason=unrelated_prefetch_finalize_pending event_rid=%s",
+                        "[HiCachePrefetchWaitPass] rid=%s reason=unrelated_pp_event event_kind=%s event_rid=%s event_seq=%s",
                         req_id,
+                        event.kind,
                         event.rid,
+                        event.seq,
                     )
 
         # todo: more policies for prefetch progress such as timeout

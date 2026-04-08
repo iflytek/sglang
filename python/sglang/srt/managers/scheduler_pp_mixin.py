@@ -383,6 +383,8 @@ class SchedulerPPMixin:
     ) -> Tuple[List[str], List[str], List[str], int]:
         if bootstrapped_rids is None:
             return [], [], [], 0
+        if len(bootstrapped_rids) == 0:
+            return [], [], [], 0
         if len(bootstrapped_rids) == 4:
             good_rids, bad_rids, deferred_rids, shared_capacity = bootstrapped_rids
             return good_rids, bad_rids, deferred_rids, shared_capacity
@@ -903,7 +905,6 @@ class SchedulerPPMixin:
                         bmbs,
                         next_first_rank_mb_id,
                         consensus_bootstrapped_rids,
-                        bootstrapped_rids,
                     )
                 )
                 send_release_work, release_rids = (
@@ -1526,6 +1527,18 @@ class SchedulerPPMixin:
                 for req in failed_reqs:
                     self.tree_cache.pp_locally_revoked_req_ids.discard(req.rid)
             self.waiting_queue.extend(good_reqs)
+            if (
+                good_reqs
+                and self.enable_hicache_storage
+                and self.pp_group is not None
+                and not self.pp_group.is_first_rank
+            ):
+                # Do not let fresh bootstrap arrivals perturb the current pick on
+                # follow ranks, but once bootstrap consensus admits them into the
+                # waiting queue we still need to warm their storage state before
+                # they become waiting-head candidates.
+                for req in good_reqs:
+                    self._prefetch_kvcache(req)
             if self._pp_prefill_diag_enabled() and (
                 good_consensus_bootstrapped_rids
                 or bad_consensus_bootstrapped_rids
@@ -1918,13 +1931,20 @@ class SchedulerPPMixin:
         bmbs: List[List[str]],
         next_first_rank_mb_id: int,
         consensus_bootstrapped_rids: List[str],
-        bootstrapped_rids: List[str],
     ):
         # 3 (Release): send the release rids from last stage to the first stage
         send_consensus_bootstrapped_work = []
         if self.pp_group.is_last_rank:
+            # Keep the send phase aligned with the local apply phase on last rank.
+            # `consensus_bootstrapped_rids` is populated from the previously applied slot
+            # at the end of the loop, so forwarding it here keeps PP0 and PP1 on the
+            # same admitted bootstrap snapshot.
             if bmbs[next_first_rank_mb_id] is not None:
-                consensus_bootstrapped_rids = bootstrapped_rids
+                if consensus_bootstrapped_rids is None:
+                    # Seed the delayed-send pipeline with a well-formed empty snapshot.
+                    # This preserves the recv/send cadence without letting PP0 consume
+                    # current-slot bootstrap consensus ahead of the last rank's local apply.
+                    consensus_bootstrapped_rids = [[], [], [], 0]
                 send_consensus_bootstrapped_work = self._pp_send_pyobj_to_next_stage(
                     consensus_bootstrapped_rids, async_send=True
                 )
