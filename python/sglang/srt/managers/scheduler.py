@@ -1497,20 +1497,30 @@ class Scheduler(
                 and self.attn_cp_rank == 0
             ):
                 if hasattr(self, "_pp_unpack_req_payload"):
-                    recv_reqs, pp_hicache_host_tree_events = (
+                    recv_reqs, pp_hicache_host_tree_events, _pp_has_batch = (
                         self._pp_unpack_req_payload(recv_reqs)
                     )
+                    if _pp_has_batch is not None:
+                        self._pp_prev_stage_had_batch = _pp_has_batch
                 else:
                     pp_hicache_host_tree_events = []
 
         if self.input_blocker is not None:
             recv_reqs = self.input_blocker.handle(recv_reqs)
 
+        _pp_has_batch_flag = getattr(self, "_pp_prev_stage_had_batch", None)
+
         if self.server_args.enable_dp_attention:
             if self.attn_tp_rank == 0 and self.attn_cp_rank == 0:
                 work_reqs, control_reqs = self._split_work_and_control_reqs(recv_reqs)
-                if self.pp_rank > 0 and pp_hicache_host_tree_events:
-                    work_payload = (work_reqs, pp_hicache_host_tree_events)
+                if self.pp_rank > 0 and (
+                    pp_hicache_host_tree_events or _pp_has_batch_flag is not None
+                ):
+                    work_payload = (
+                        work_reqs,
+                        pp_hicache_host_tree_events,
+                        _pp_has_batch_flag,
+                    )
                 else:
                     work_payload = work_reqs
             else:
@@ -1536,6 +1546,14 @@ class Scheduler(
             if (
                 self.pp_rank > 0
                 and isinstance(work_payload, tuple)
+                and len(work_payload) == 3
+            ):
+                work_reqs, pp_hicache_host_tree_events, _pp_has_batch_flag = (
+                    work_payload
+                )
+            elif (
+                self.pp_rank > 0
+                and isinstance(work_payload, tuple)
                 and len(work_payload) == 2
             ):
                 work_reqs, pp_hicache_host_tree_events = work_payload
@@ -1552,8 +1570,14 @@ class Scheduler(
                 )
             recv_reqs = work_reqs + control_reqs
         elif self.tp_size != 1:
-            if self.pp_rank > 0 and pp_hicache_host_tree_events:
-                recv_payload = (recv_reqs, pp_hicache_host_tree_events)
+            if self.pp_rank > 0 and (
+                pp_hicache_host_tree_events or _pp_has_batch_flag is not None
+            ):
+                recv_payload = (
+                    recv_reqs,
+                    pp_hicache_host_tree_events,
+                    _pp_has_batch_flag,
+                )
             else:
                 recv_payload = recv_reqs
             recv_payload = broadcast_pyobj(
@@ -1565,12 +1589,23 @@ class Scheduler(
             if (
                 self.pp_rank > 0
                 and isinstance(recv_payload, tuple)
+                and len(recv_payload) == 3
+            ):
+                recv_reqs, pp_hicache_host_tree_events, _pp_has_batch_flag = (
+                    recv_payload
+                )
+            elif (
+                self.pp_rank > 0
+                and isinstance(recv_payload, tuple)
                 and len(recv_payload) == 2
             ):
                 recv_reqs, pp_hicache_host_tree_events = recv_payload
             else:
                 recv_reqs = recv_payload
                 pp_hicache_host_tree_events = ()
+
+        if self.pp_rank > 0 and _pp_has_batch_flag is not None:
+            self._pp_prev_stage_had_batch = _pp_has_batch_flag
 
         if self.pp_rank > 0:
             if (

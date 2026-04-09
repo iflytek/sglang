@@ -36,6 +36,7 @@ from sglang.srt.utils import DynamicGradMode, broadcast_pyobj, point_to_point_py
 logger = logging.getLogger(__name__)
 
 _PP_REQ_PAYLOAD_V1 = "__pp_req_payload_v1__"
+_PP_REQ_PAYLOAD_V2 = "__pp_req_payload_v2__"
 _PP_RELEASE_PAYLOAD_V1 = "__pp_release_payload_v1__"
 _PP_RELEASE_PAYLOAD_V2 = "__pp_release_payload_v2__"
 _PP_FRONTIER_ACK_HEADER = struct.Struct("<qI?")
@@ -166,8 +167,18 @@ class SchedulerPPMixin:
         return int(mb_id), tuple(ack_rids), barrier_rid
 
     def _pp_pack_req_payload(
-        self: Scheduler, recv_reqs, hicache_host_tree_events: List[object]
+        self: Scheduler,
+        recv_reqs,
+        hicache_host_tree_events: List[object],
+        has_batch: Optional[bool] = None,
     ):
+        if has_batch is not None:
+            return (
+                _PP_REQ_PAYLOAD_V2,
+                recv_reqs,
+                hicache_host_tree_events or [],
+                has_batch,
+            )
         if not hicache_host_tree_events:
             return recv_reqs
         return (
@@ -178,16 +189,26 @@ class SchedulerPPMixin:
 
     def _pp_unpack_req_payload(
         self: Scheduler, payload
-    ) -> Tuple[object, List[object]]:
+    ) -> Tuple[object, List[object], Optional[bool]]:
+        if (
+            isinstance(payload, tuple)
+            and len(payload) == 4
+            and payload[0] == _PP_REQ_PAYLOAD_V2
+        ):
+            return payload[1], payload[2] or (), payload[3]
         if (
             isinstance(payload, tuple)
             and len(payload) == 3
             and payload[0] == _PP_REQ_PAYLOAD_V1
         ):
-            return payload[1], payload[2] or ()
+            return payload[1], payload[2] or (), None
         if isinstance(payload, dict) and "recv_reqs" in payload:
-            return payload["recv_reqs"], payload.get("hicache_host_tree_events") or ()
-        return payload, ()
+            return (
+                payload["recv_reqs"],
+                payload.get("hicache_host_tree_events") or (),
+                payload.get("has_batch"),
+            )
+        return payload, (), None
 
     def _pp_prefill_safe_len(self: Scheduler, value) -> int:
         if value is None:
@@ -597,7 +618,9 @@ class SchedulerPPMixin:
             prealloc=len(getattr(self, "disagg_prefill_prealloc_queue", [])),
         )
 
-    def _pp_build_req_payload(self: Scheduler, recv_reqs):
+    def _pp_build_req_payload(
+        self: Scheduler, recv_reqs, has_batch: Optional[bool] = None
+    ):
         if self.pp_group.is_last_rank:
             return recv_reqs
         events = []
@@ -607,7 +630,7 @@ class SchedulerPPMixin:
             and hasattr(self.tree_cache, "consume_pp_host_tree_events")
         ):
             events = self.tree_cache.consume_pp_host_tree_events()
-        return self._pp_pack_req_payload(recv_reqs, events)
+        return self._pp_pack_req_payload(recv_reqs, events, has_batch=has_batch)
 
     def _pp_apply_hicache_sync_before_batch(self: Scheduler) -> None:
         if (
@@ -859,7 +882,23 @@ class SchedulerPPMixin:
                     )
 
                 self.process_prefill_chunk()
-                batch = self.get_new_batch_prefill()
+                # PP follow rank: if the previous stage (PP0) had an empty
+                # batch for this pipeline slot, force an empty batch here too.
+                # This keeps proxy tensor send/recv paired across the pipeline.
+                _pp_force_empty = (
+                    self.pp_group.is_last_rank
+                    and getattr(self, "_pp_prev_stage_had_batch", None) is False
+                )
+                if _pp_force_empty:
+                    batch = None
+                    if prefill_diag_enabled:
+                        self._pp_prefill_diag_log(
+                            "batch_pick_forced_empty",
+                            mb=mb_id,
+                            reason="pp_prev_stage_had_no_batch",
+                        )
+                else:
+                    batch = self.get_new_batch_prefill()
                 batch = self.maybe_prepare_mlp_sync_batch(batch)
                 self.mbs[mb_id] = batch
                 self.running_mbs[mb_id] = self.running_batch
@@ -951,7 +990,11 @@ class SchedulerPPMixin:
                 # recv_proxy_tensors.
                 if not self.pp_group.is_last_rank:
                     self.send_req_work = self._pp_send_pyobj_to_next_stage(
-                        self._pp_build_req_payload(recv_reqs), async_send=True
+                        self._pp_build_req_payload(
+                            recv_reqs,
+                            has_batch=self.cur_batch is not None,
+                        ),
+                        async_send=True,
                     )
                     send_bootstrapped_work = self._pp_send_pyobj_to_next_stage(
                         bootstrapped_rids, async_send=True

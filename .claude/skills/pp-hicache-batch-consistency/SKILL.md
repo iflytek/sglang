@@ -151,6 +151,35 @@ if not self.can_terminate_prefetch(operation):
 
 **Zero transport changes** — purely local behavior on PP1. No impact on startup, warmup, non-PP, or non-storage modes.
 
+### Root Cause 5: Micro-Batch Phase Misalignment from Asymmetric Empty Batches
+
+**Problem**: In the disagg prefill PP event loop, PP0's sends (req/bootstrap/transfer/proxy) for mb_id=X are received by PP1 at mb_id=X+1 (1-step pipeline delay). The proxy tensor send is **conditional** on `cur_batch is not None`. When PP0's write-backup barrier (Root Cause 1) or prefetch barrier (Root Cause 3) causes an **empty batch** on PP0 at mb_id=X, PP0 skips the proxy send. PP1, however, may pick a non-empty batch at mb_id=X+1 (because PP1's tree state already had the events replayed). PP1 tries to recv proxy but PP0 never sent it — **permanent phase offset deadlock**.
+
+**Why the existing barriers are insufficient**: The barriers in Root Causes 1-3 correctly prevent batch *content* divergence (same request, different prefix). But they create batch *presence* divergence (PP0 empty, PP1 non-empty). The 1-step pipeline offset means PP0's empty batch shifts all subsequent mb_ids by 1, and the proxy send/recv pairing is permanently broken.
+
+**Symptom**: PP0 and PP1 batch_pick logs show identical request content but different mb_ids (e.g., PP0 picks `e52` on mb=0, PP1 picks `e52` on mb=1). PP0's batch_pick sequence has an extra empty batch (`batch=[]`) that PP1 doesn't have. PP0 has one more batch_pick iteration than PP1.
+
+**Fix**: PP0 includes a `has_batch` flag in the req payload (`_PP_REQ_PAYLOAD_V2`). PP1 receives this flag in `recv_requests()` and saves it as `_pp_prev_stage_had_batch`. Before PP1's batch pick, if the flag is `False`, PP1 forces `batch=None` (skipping `get_new_batch_prefill()`). This keeps proxy tensor send/recv paired across the pipeline.
+
+```python
+# In event_loop_pp_disagg_prefill, before batch pick on PP1:
+_pp_force_empty = (
+    self.pp_group.is_last_rank
+    and getattr(self, "_pp_prev_stage_had_batch", None) is False
+)
+if _pp_force_empty:
+    batch = None
+else:
+    batch = self.get_new_batch_prefill()
+
+# PP0 sends the flag in the req payload:
+self._pp_build_req_payload(recv_reqs, has_batch=self.cur_batch is not None)
+```
+
+**Key files**:
+- `python/sglang/srt/managers/scheduler_pp_mixin.py` — `_pp_pack_req_payload` (V2 format), `event_loop_pp_disagg_prefill` (force-empty gate)
+- `python/sglang/srt/managers/scheduler.py` — `recv_requests()` (extract and broadcast `has_batch` flag)
+
 ## Debug Methodology
 
 ### Key Log Patterns
