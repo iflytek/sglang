@@ -2622,49 +2622,8 @@ class Scheduler(
             # same replay loop for every waiting request.
             self.tree_cache.replay_pp_host_tree_events()
 
-        follow_rank_revoked_head = None
-        follow_rank_revoked_rids = set()
-        if (
-            self.enable_hicache_storage
-            and hasattr(self, "pp_group")
-            and not self.pp_group.is_first_rank
-            and hasattr(self.tree_cache, "pp_locally_revoked_req_ids")
-        ):
-            follow_rank_revoked_rids = set(self.tree_cache.pp_locally_revoked_req_ids)
-            if hasattr(self.tree_cache, "peek_pp_locally_revoked_req"):
-                follow_rank_revoked_head = self.tree_cache.peek_pp_locally_revoked_req()
-
         head_empty_issue = None
         for req in self.waiting_queue:
-            if follow_rank_revoked_rids and req.rid in follow_rank_revoked_rids:
-                if len(adder.can_run_list) == 0:
-                    head_empty_issue = {
-                        "rid": req.rid,
-                        "stop": "locally_revoked",
-                        "revoked_head": follow_rank_revoked_head,
-                    }
-                if frontier_diag:
-                    logger.warning(
-                        "[PPFrontierDiag][locally_revoked_barrier] pp=%s cp=%s tp=%s revoked_head=%s revoked=%s waiting=%s bootstrap=%s reason=revoked_rid rid=%s",
-                        self.pp_rank,
-                        self.attn_cp_rank,
-                        self.attn_tp_rank,
-                        follow_rank_revoked_head,
-                        sorted(list(follow_rank_revoked_rids))[:8],
-                        [x.rid for x in self.waiting_queue[:8]],
-                        [
-                            x.rid
-                            for x in getattr(
-                                getattr(self, "disagg_prefill_bootstrap_queue", None),
-                                "queue",
-                                [],
-                            )[:4]
-                        ],
-                        req.rid,
-                    )
-                if hasattr(self, "_record_prefill_pick_reason"):
-                    self._record_prefill_pick_reason("locally_revoked_break")
-                break
             if self.enable_lora and req.lora_id not in running_loras:
                 if self.enable_lora_overlap_loading:
                     # For overlapping loading of LoRA weights with computation, we will load each adapter one at a time,
