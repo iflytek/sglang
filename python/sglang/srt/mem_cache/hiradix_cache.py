@@ -396,6 +396,7 @@ class HiRadixCache(RadixCache):
         # key: request_id, value: number of tokens actually loaded from storage
         self.prefetch_loaded_tokens_by_reqid: dict[str, int] = {}
         self.prefetch_issue_count_by_reqid: dict[str, int] = {}
+        self.prefetch_issued_not_consumed_req_ids: set[str] = set()
         self.zero_hit_prefetch_req_ids: set[str] = set()
         # todo: dynamically adjust the threshold
         self.write_through_threshold = (
@@ -1128,6 +1129,7 @@ class HiRadixCache(RadixCache):
         # Clear per-request tracking dicts
         self.prefetch_loaded_tokens_by_reqid.clear()
         self.prefetch_issue_count_by_reqid.clear()
+        self.prefetch_issued_not_consumed_req_ids.clear()
         self.zero_hit_prefetch_req_ids.clear()
         self.evictable_host_leaves.clear()
         self.pp_outgoing_host_tree_events.clear()
@@ -1481,6 +1483,7 @@ class HiRadixCache(RadixCache):
             if self.cache_controller.prefetch_tokens_occupied < 0:
                 self.cache_controller.prefetch_tokens_occupied = 0
         self.prefetch_loaded_tokens_by_reqid.pop(req_id, None)
+        self.prefetch_issued_not_consumed_req_ids.discard(req_id)
         if zero_hit:
             self.zero_hit_prefetch_req_ids.add(req_id)
             if mark_local_revoke and self._pp_downstream_sync_enabled():
@@ -1538,6 +1541,7 @@ class HiRadixCache(RadixCache):
         """
         self.prefetch_loaded_tokens_by_reqid.pop(req_id, None)
         self.prefetch_issue_count_by_reqid.pop(req_id, None)
+        self.prefetch_issued_not_consumed_req_ids.discard(req_id)
         self.zero_hit_prefetch_req_ids.discard(req_id)
         self.pp_retry_prefetch_req_ids.discard(req_id)
         self.pp_authoritative_revoked_req_ids.discard(req_id)
@@ -2068,22 +2072,33 @@ class HiRadixCache(RadixCache):
                 loaded_tokens_before = self.prefetch_loaded_tokens_by_reqid.get(
                     req_id, 0
                 )
+                had_issued_not_consumed = (
+                    req_id in self.prefetch_issued_not_consumed_req_ids
+                )
+                had_zero_hit = req_id in self.zero_hit_prefetch_req_ids
+                had_local_revoke = req_id in self.pp_locally_revoked_req_ids
                 self.zero_hit_prefetch_req_ids.discard(req_id)
                 self.discard_pp_locally_revoked_req(req_id)
-                if loaded_tokens_before > 0:
+                if loaded_tokens_before > 0 or (
+                    had_issued_not_consumed and not had_zero_hit and not had_local_revoke
+                ):
                     # The follow rank already finished a local prefetch for this
-                    # request and has the loaded tokens buffered for the next
-                    # pick. A delayed upstream finalize should not force the
-                    # same waiting-admission epoch to issue another prefetch.
+                    # request, or it already issued one local prefetch for the
+                    # current waiting-admission epoch and has not consumed or
+                    # cleaned it yet. A delayed upstream finalize should not
+                    # force the same epoch to issue another prefetch.
                     if self._hicache_verbose_enabled():
                         logger.warning(
-                            "[HiCachePPEvent][replay_skip_retry_prefetch] pp=%s cp=%s seq=%s rid=%s loaded=%s local_loaded=%s",
+                            "[HiCachePPEvent][replay_skip_retry_prefetch] pp=%s cp=%s seq=%s rid=%s loaded=%s local_loaded=%s issued_not_consumed=%s zero_hit=%s local_revoke=%s",
                             self.pp_rank,
                             self.attn_cp_rank,
                             event.seq,
                             req_id,
                             event.loaded_from_storage,
                             loaded_tokens_before,
+                            had_issued_not_consumed,
+                            had_zero_hit,
+                            had_local_revoke,
                         )
                 else:
                     self.pp_retry_prefetch_req_ids.add(req_id)
@@ -2923,6 +2938,7 @@ class HiRadixCache(RadixCache):
         # Keep the zero-hit marker until an explicit retry signal or request
         # teardown clears it. Otherwise the same waiting req can re-enter local
         # storage prefetch immediately after a zero-hit revoke.
+        self.prefetch_issued_not_consumed_req_ids.discard(req_id)
         return self.prefetch_loaded_tokens_by_reqid.pop(req_id, 0)
 
     def match_prefix(self, params: MatchPrefixParams):
@@ -3210,6 +3226,7 @@ class HiRadixCache(RadixCache):
         )
         issue_idx = self.prefetch_issue_count_by_reqid.get(req_id, 0) + 1
         self.prefetch_issue_count_by_reqid[req_id] = issue_idx
+        self.prefetch_issued_not_consumed_req_ids.add(req_id)
         if os.getenv("SGLANG_DEBUG_PP_PREFETCH_TRACE", "0") == "1":
             logger.warning(
                 "[PPPrefetchTrace] pp=%s cp=%s tp=%s rid=%s phase=issue issue_idx=%s "
