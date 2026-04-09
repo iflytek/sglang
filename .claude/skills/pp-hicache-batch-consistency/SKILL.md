@@ -117,27 +117,39 @@ if (
 
 This causes `PrefillAdder` on PP0 to compute `new_tokens=45` for the request (accepted) while PP1 computes `new_tokens=365` (rejected due to token budget), resulting in different batch sizes (PP0: 6 reqs, PP1: 4 reqs) → shape crash in the forward pass.
 
-**Key insight**: The PREFETCH_FINALIZE event only syncs host tree metadata, not actual KV data. PP1 receiving the event creates metadata nodes but doesn't load KV data from L3. PP1 must independently complete its own L3 prefetch to converge.
+**Key insight**: L3 cache hits are **deterministic** — both PP0 and PP1 compute the same token hashes, so if PP0 gets an L3 hit, PP1 will too. The only difference is *when* the KV download finishes. PP1 just needs to wait for its own download to complete.
 
 **Why Root Cause 3 fix was insufficient**: The `has_outgoing_pp_prefetch_settle_event_for_req` barrier only checks the outgoing queue. By the time PP0 picks the request (seconds later), the event has already been consumed and sent. The barrier returns false.
 
-**Fix** (commit `f5ff097`): Watermark-based barrier. PP0 tracks the `_pp_consume_seq` (incremented each `consume_pp_host_tree_events()` call). When PREFETCH_FINALIZE is emitted, the rid and current seq are recorded in `pp_prefetch_unsettled_rids`. `has_unsettled_pp_prefetch_for_req()` barriers PP0 from picking the request until `N` consume rounds have passed (default 5, configurable via `SGLANG_PP_PREFETCH_SETTLE_ROUNDS`), giving PP1 time to complete its own L3 load.
+**Why a watermark/round-counting approach was rejected**: An earlier iteration tracked `_pp_consume_seq` and barriered PP0 until N rounds passed. This used a magic number with no semantic guarantee — if L3 latency spikes, any fixed round count is wrong.
+
+**Fix** (commit `0e5a5a8`): PP1 (follow rank) synchronous wait in `check_prefetch_progress()`. When `can_terminate_prefetch(operation)` returns False but the L3 hit is confirmed (`len(operation.hash_value) > 0`), PP1 spin-waits instead of returning False (which would break out and retry next iteration). Since the hit is deterministic, waiting guarantees PP1 gets the same prefix as PP0 in the same batch-pick iteration.
 
 ```python
-# In hiradix_cache.py
-_PP_PREFETCH_SETTLE_ROUNDS = int(os.getenv("SGLANG_PP_PREFETCH_SETTLE_ROUNDS", "5"))
-
-def has_unsettled_pp_prefetch_for_req(self, req_rid):
-    emit_seq = self.pp_prefetch_unsettled_rids.get(req_rid)
-    if emit_seq is None:
+# In hiradix_cache.py check_prefetch_progress()
+if not self.can_terminate_prefetch(operation):
+    # PP follow rank with confirmed L3 hit: synchronously wait for
+    # the KV download to finish instead of returning False (which
+    # would cause a break and retry next iteration).  The hit is
+    # deterministic (same token hashes), so PP0 already has the same
+    # data.  Waiting here makes PP1's prefix converge with PP0's in
+    # the same batch-pick iteration — no ack or watermark needed.
+    if (
+        self.pp_size > 1
+        and self.pp_rank > 0
+        and len(operation.hash_value) > 0
+        and not operation.is_terminated()
+    ):
+        while not self.can_terminate_prefetch(operation):
+            time.sleep(0.001)
+        # Fall through to _finalize_prefetch_progress below.
+    else:
         return False
-    if self._pp_consume_seq - emit_seq >= self._PP_PREFETCH_SETTLE_ROUNDS:
-        del self.pp_prefetch_unsettled_rids[req_rid]
-        return False
-    return True
 ```
 
-**Zero transport changes** — purely local state on PP0. No impact on startup, warmup, non-PP, or non-storage modes.
+**Why this is safe**: `can_terminate_prefetch` already has TP-level `all_reduce` (across TP workers within the same PP rank) but NOT PP-level. The spin-loop calls `can_terminate_prefetch` with `time.sleep(0.001)`, which is safe because all TP workers on the same PP rank enter the spin together. The wait is bounded by L3 download time (typically milliseconds to low seconds).
+
+**Zero transport changes** — purely local behavior on PP1. No impact on startup, warmup, non-PP, or non-storage modes.
 
 ## Debug Methodology
 

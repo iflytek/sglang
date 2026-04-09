@@ -943,6 +943,30 @@ class SchedulerPPMixin:
                     )
                 )
 
+                # Send req/bootstrap/transfer/proxy to next stage BEFORE
+                # blocking on recv consensus.  PP0 must deliver proxy tensors
+                # so PP1 can forward and eventually send the consensus reply
+                # that PP0 is about to wait for.  Without this, a deadlock
+                # occurs: PP0 blocks on recv_consensus while PP1 blocks on
+                # recv_proxy_tensors.
+                if not self.pp_group.is_last_rank:
+                    self.send_req_work = self._pp_send_pyobj_to_next_stage(
+                        self._pp_build_req_payload(recv_reqs), async_send=True
+                    )
+                    send_bootstrapped_work = self._pp_send_pyobj_to_next_stage(
+                        bootstrapped_rids, async_send=True
+                    )
+                    send_transfer_work = self._pp_send_pyobj_to_next_stage(
+                        transferred_rids, async_send=True
+                    )
+                    if self.cur_batch:
+                        torch.cuda.current_stream().wait_event(self.launch_event)
+                        self.send_proxy_work = self._pp_send_dict_to_next_stage(
+                            result.pp_hidden_states_proxy_tensors.tensors,
+                            async_send=True,
+                            msg_type="proxy",
+                        )
+
                 if bmbs[next_mb_id] is not None:
                     recv_consensus_bootstrapped_rids = (
                         self._pp_recv_pyobj_from_prev_stage()
@@ -1085,23 +1109,6 @@ class SchedulerPPMixin:
                         )
                     # Consume this microbatch's release consensus exactly once.
                     tmbs[next_mb_id] = None
-                if not self.pp_group.is_last_rank:
-                    self.send_req_work = self._pp_send_pyobj_to_next_stage(
-                        self._pp_build_req_payload(recv_reqs), async_send=True
-                    )
-                    send_bootstrapped_work = self._pp_send_pyobj_to_next_stage(
-                        bootstrapped_rids, async_send=True
-                    )
-                    send_transfer_work = self._pp_send_pyobj_to_next_stage(
-                        transferred_rids, async_send=True
-                    )
-                    if self.cur_batch:
-                        torch.cuda.current_stream().wait_event(self.launch_event)
-                        self.send_proxy_work = self._pp_send_dict_to_next_stage(
-                            result.pp_hidden_states_proxy_tensors.tensors,
-                            async_send=True,
-                            msg_type="proxy",
-                        )
 
                 self.pp_outputs = next_pp_outputs
                 release_rids = next_release_rids
