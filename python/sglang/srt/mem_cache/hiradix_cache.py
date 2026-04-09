@@ -2988,15 +2988,21 @@ class HiRadixCache(RadixCache):
 
     def pop_prefetch_loaded_tokens(self, req_id: str) -> int:
         """
-        Pop and return the number of tokens loaded from storage for a request.
+        Return the number of tokens loaded from storage for a request.
         Returns 0 if no prefetch was done or was revoked.
         This should be called after check_prefetch_progress() returns True.
+
+        Uses get() instead of pop() so the value survives across multiple
+        batch-pick iterations.  In PP + chunked prefill, a request may pass
+        check_prefetch_progress (finalize) but not be selected into the batch
+        because the chunked_req consumed the token budget.  On the next
+        iteration the request re-enters the waiting-queue walk; with pop() the
+        storage tokens would already be consumed, causing storage_hit_length=0
+        and a shorter prefix — diverging from the other PP rank.
+        Cleanup happens in release_aborted_request / _finalize_prefetch_progress.
         """
-        # Keep the zero-hit marker until an explicit retry signal or request
-        # teardown clears it. Otherwise the same waiting req can re-enter local
-        # storage prefetch immediately after a zero-hit revoke.
         self.prefetch_issued_not_consumed_req_ids.discard(req_id)
-        return self.prefetch_loaded_tokens_by_reqid.pop(req_id, 0)
+        return self.prefetch_loaded_tokens_by_reqid.get(req_id, 0)
 
     def match_prefix(self, params: MatchPrefixParams):
         start_time = time.perf_counter()
