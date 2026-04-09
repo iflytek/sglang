@@ -2718,12 +2718,21 @@ class Scheduler(
                 )
 
             req.init_next_round_input(self.tree_cache)
-            if (
-                self.pp_group is not None
-                and not self.pp_group.is_first_rank
-                and hasattr(self.tree_cache, "has_pending_pp_write_backup_event_for_req")
-                and self.tree_cache.has_pending_pp_write_backup_event_for_req(req)
-            ):
+            _wb_barrier = False
+            if self.pp_group is not None and self.enable_hicache_storage:
+                if (
+                    not self.pp_group.is_first_rank
+                    and hasattr(self.tree_cache, "has_pending_pp_write_backup_event_for_req")
+                    and self.tree_cache.has_pending_pp_write_backup_event_for_req(req)
+                ):
+                    _wb_barrier = True
+                elif (
+                    self.pp_group.is_first_rank
+                    and hasattr(self.tree_cache, "has_outgoing_pp_write_backup_event_for_req")
+                    and self.tree_cache.has_outgoing_pp_write_backup_event_for_req(req)
+                ):
+                    _wb_barrier = True
+            if _wb_barrier:
                 if len(adder.can_run_list) == 0:
                     wb_debug = {}
                     if hasattr(
