@@ -989,10 +989,21 @@ class SchedulerPPMixin:
                 # occurs: PP0 blocks on recv_consensus while PP1 blocks on
                 # recv_proxy_tensors.
                 if not self.pp_group.is_last_rank:
+                    # Only send has_batch=False when a barrier caused the
+                    # empty batch (PP0 has waiting requests but couldn't pick).
+                    # Normal idle (no requests) doesn't need the flag — PP1
+                    # will also be idle naturally.  Sending False during idle
+                    # would force PP1 to skip batches unnecessarily, halving
+                    # pipeline utilization.
+                    _send_has_batch = None  # default: don't constrain PP1
+                    if self.cur_batch is not None:
+                        _send_has_batch = True
+                    elif self.waiting_queue or self.chunked_req is not None:
+                        _send_has_batch = False
                     self.send_req_work = self._pp_send_pyobj_to_next_stage(
                         self._pp_build_req_payload(
                             recv_reqs,
-                            has_batch=self.cur_batch is not None,
+                            has_batch=_send_has_batch,
                         ),
                         async_send=True,
                     )
