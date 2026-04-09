@@ -1413,6 +1413,17 @@ class HiRadixCache(RadixCache):
                 return True
         return False
 
+    def has_outgoing_pp_prefetch_settle_event_for_req(self, req_rid: str) -> bool:
+        """PP0 side: check if outgoing has PREFETCH_FINALIZE/SKIP/REVOKE for this rid."""
+        if self.pp_rank != 0 or self.pp_size <= 1:
+            return False
+        for encoded_event in self.pp_outgoing_host_tree_events:
+            decoded = _decode_pp_host_tree_wire_event(encoded_event)
+            if decoded.kind in ("PREFETCH_FINALIZE", "PREFETCH_SKIP", "REVOKE"):
+                if decoded.rid == req_rid:
+                    return True
+        return False
+
     def has_pending_pp_write_backup_event_for_req(self, req) -> bool:
         if not self._pp_write_backup_replay_enabled():
             return False

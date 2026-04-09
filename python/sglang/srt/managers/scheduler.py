@@ -2717,6 +2717,25 @@ class Scheduler(
                     req.rid
                 )
 
+            # PP0: barrier if we just emitted a PREFETCH_FINALIZE/SKIP/REVOKE
+            # that PP1 hasn't received yet. PP1 can't finalize without this
+            # event, so its match_prefix result will differ.
+            if (
+                self.enable_hicache_storage
+                and self.pp_group is not None
+                and self.pp_group.is_first_rank
+                and hasattr(self.tree_cache, "has_outgoing_pp_prefetch_settle_event_for_req")
+                and self.tree_cache.has_outgoing_pp_prefetch_settle_event_for_req(req.rid)
+            ):
+                if len(adder.can_run_list) == 0:
+                    head_empty_issue = {
+                        "rid": req.rid,
+                        "stop": "prefetch_settle_outgoing",
+                    }
+                if hasattr(self, "_record_prefill_pick_reason"):
+                    self._record_prefill_pick_reason("prefetch_settle_outgoing_break")
+                break
+
             req.init_next_round_input(self.tree_cache)
             _wb_barrier = False
             if self.pp_group is not None and self.enable_hicache_storage:
