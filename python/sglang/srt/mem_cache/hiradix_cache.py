@@ -413,7 +413,6 @@ class HiRadixCache(RadixCache):
         self.pp_authoritative_revoked_req_ids: set[str] = set()
         self.pp_soft_skipped_req_ids: set[str] = set()
         self.pp_staged_prefetch_skip_req_ids: set[str] = set()
-        self.pp_prefetch_unsettled_rids: Dict[str, int] = {}
         self._pp_consume_seq: int = 0
         self._in_pp_host_tree_replay = False
         self._match_perf_calls = 0
@@ -1143,7 +1142,6 @@ class HiRadixCache(RadixCache):
         self.pp_authoritative_revoked_req_ids.clear()
         self.pp_soft_skipped_req_ids.clear()
         self.pp_staged_prefetch_skip_req_ids.clear()
-        self.pp_prefetch_unsettled_rids.clear()
         self._pp_consume_seq = 0
         self._tree_counter_last_snapshot = 0
         self._tree_alloc_match_split = 0
@@ -1429,31 +1427,6 @@ class HiRadixCache(RadixCache):
                     return True
         return False
 
-    # Number of consume_pp_host_tree_events() rounds to wait after emitting
-    # PREFETCH_FINALIZE before allowing PP0 to pick the request.  This gives
-    # PP1 enough time to receive the event, start its own L3 prefetch, and
-    # complete it so that match_prefix returns the same result on both ranks.
-    # Each round ≈ one PP loop iteration.  The value must cover:
-    #   1 round  – event delivery to PP1
-    #   2-3 rounds – PP1 L3 load time (empirically 1-3 seconds)
-    #   1 round  – PP1 batch pick with settled prefix
-    _PP_PREFETCH_SETTLE_ROUNDS = int(
-        os.getenv("SGLANG_PP_PREFETCH_SETTLE_ROUNDS", "5")
-    )
-
-    def has_unsettled_pp_prefetch_for_req(self, req_rid: str) -> bool:
-        """PP0 side: check if this rid has a completed prefetch that PP1
-        hasn't had enough rounds to also complete."""
-        if self.pp_rank != 0 or self.pp_size <= 1:
-            return False
-        emit_seq = self.pp_prefetch_unsettled_rids.get(req_rid)
-        if emit_seq is None:
-            return False
-        if self._pp_consume_seq - emit_seq >= self._PP_PREFETCH_SETTLE_ROUNDS:
-            del self.pp_prefetch_unsettled_rids[req_rid]
-            return False
-        return True
-
     def has_pending_pp_write_backup_event_for_req(self, req) -> bool:
         if not self._pp_write_backup_replay_enabled():
             return False
@@ -1602,7 +1575,6 @@ class HiRadixCache(RadixCache):
         self.pp_authoritative_revoked_req_ids.discard(req_id)
         self.pp_soft_skipped_req_ids.discard(req_id)
         self.pp_staged_prefetch_skip_req_ids.discard(req_id)
-        self.pp_prefetch_unsettled_rids.pop(req_id, None)
         self.clear_follow_rank_prefetch_issue_pending(req_id)
         self.discard_pp_locally_revoked_req(req_id)
         self._purge_matching_local_revoke_residue(req_id)
@@ -2115,8 +2087,6 @@ class HiRadixCache(RadixCache):
                     loaded_from_storage=loaded_from_storage,
                 )
             )
-            if self.pp_size > 1 and self.pp_rank == 0:
-                self.pp_prefetch_unsettled_rids[req_id] = self._pp_consume_seq
         if self.enable_storage_metrics:
             self.storage_metrics_collector.log_prefetched_tokens(loaded_from_storage)
         return loaded_from_storage
@@ -2962,23 +2932,39 @@ class HiRadixCache(RadixCache):
             return True
 
         if not self.can_terminate_prefetch(operation):
-            debug_state = self._get_prefetch_progress_debug(req_id)
-            if self._hicache_verbose_enabled():
-                logger.warning(
-                    "[HiCacheEmptyPrefetchState] rid=%s zero_hit_marked=%s replay_pending=%s state=%s",
-                    req_id,
-                    req_id in self.zero_hit_prefetch_req_ids,
-                    self._peek_pp_host_tree_event() is not None
-                    if self._pp_downstream_sync_enabled()
-                    else False,
-                    debug_state,
-                )
-                logger.warning(
-                    "[HiCachePrefetchWait] rid=%s state=%s",
-                    req_id,
-                    debug_state,
-                )
-            return False
+            # PP follow rank with confirmed L3 hit: synchronously wait for
+            # the KV download to finish instead of returning False (which
+            # would cause a break and retry next iteration).  The hit is
+            # deterministic (same token hashes), so PP0 already has the same
+            # data.  Waiting here makes PP1's prefix converge with PP0's in
+            # the same batch-pick iteration — no ack or watermark needed.
+            if (
+                self.pp_size > 1
+                and self.pp_rank > 0
+                and len(operation.hash_value) > 0
+                and not operation.is_terminated()
+            ):
+                while not self.can_terminate_prefetch(operation):
+                    time.sleep(0.001)
+                # Fall through to _finalize_prefetch_progress below.
+            else:
+                debug_state = self._get_prefetch_progress_debug(req_id)
+                if self._hicache_verbose_enabled():
+                    logger.warning(
+                        "[HiCacheEmptyPrefetchState] rid=%s zero_hit_marked=%s replay_pending=%s state=%s",
+                        req_id,
+                        req_id in self.zero_hit_prefetch_req_ids,
+                        self._peek_pp_host_tree_event() is not None
+                        if self._pp_downstream_sync_enabled()
+                        else False,
+                        debug_state,
+                    )
+                    logger.warning(
+                        "[HiCachePrefetchWait] rid=%s state=%s",
+                        req_id,
+                        debug_state,
+                    )
+                return False
         self._finalize_prefetch_progress(req_id, operation, emit_event=True)
         if self._pp_downstream_sync_enabled():
             event = self._peek_pp_host_tree_event()
