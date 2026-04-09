@@ -2444,6 +2444,19 @@ class HiRadixCache(RadixCache):
                 self.pp_pending_host_tree_events.popleft()
             return
 
+        # PP0: defer consuming new write-through acks while previous
+        # WRITE_BACKUP_COMMITTED events have not been sent to PP1 yet.
+        # Consuming acks triggers dec_lock_ref which changes eviction
+        # eligibility and can cause device-tree divergence between PP
+        # ranks, leading to match_prefix mismatches.
+        if (
+            self.pp_size > 1
+            and self.pp_rank < self.pp_size - 1
+            and self._pp_write_backup_replay_enabled()
+            and self.pp_outgoing_host_tree_events
+        ):
+            return
+
         finish_count = 0
         for _, finish_event, _ in self.cache_controller.ack_write_queue:
             if not finish_event.query():
