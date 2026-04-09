@@ -2492,18 +2492,6 @@ class Scheduler(
 
         if self.enable_hierarchical_cache:
             self.tree_cache.check_hicache_events()
-            # In PD prefill + PP mode, HiCache storage drains may leave TP workers at
-            # slightly different points in the loop (for example one worker is still
-            # finishing storage-control drains while another has already moved toward
-            # the next PP pyobj recv). Re-align the attention workers here so the
-            # later PP recv/broadcast collectives do not interleave with HiCache
-            # collectives and stall bootstrap queue progress.
-            if (
-                self.enable_hicache_storage
-                and self.pp_size > 1
-                and self.disaggregation_mode == DisaggregationMode.PREFILL
-            ):
-                self.tree_cache.sync_hicache_attn_groups()
 
         if self.enable_priority_preemption:
             # Reset batch_is_full to try preemption with a prefill adder.
