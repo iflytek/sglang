@@ -1950,8 +1950,11 @@ class SchedulerPPMixin:
         # Forward the exact bootstrap consensus snapshot that was just locally
         # applied for `next_mb_id`. This avoids PP0/PP1 consuming different slot
         # snapshots while keeping decode consensus semantics unchanged.
+        # Unlike decode retract/prealloc consensus, prefill bootstrap consensus
+        # should only travel from the last rank back to PP0; forwarding it from
+        # intermediate / first ranks would corrupt the req pyobj stream order.
         send_consensus_bootstrapped_work = []
-        if consensus_bootstrapped_rids is not None:
+        if self.pp_group.is_last_rank and consensus_bootstrapped_rids is not None:
             payload = consensus_bootstrapped_rids
             send_consensus_bootstrapped_work = self._pp_send_pyobj_to_next_stage(
                 payload, async_send=True
