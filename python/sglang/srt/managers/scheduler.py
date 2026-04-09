@@ -2126,13 +2126,7 @@ class Scheduler(
             self.waiting_queue.append(req)
             req.time_stats.set_wait_queue_entry_time()
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
-            # In PP follow ranks, issuing storage prefetch as soon as a request
-            # enters the bootstrap queue can perturb local prefetch/revoke state
-            # before the current waiting frontier is picked, which makes PP0/PP1
-            # diverge. Keep eager prefetch on PP0/non-PP paths, but let follow
-            # ranks issue prefetch later from the waiting-path checks.
-            if self.pp_group is None or self.pp_group.is_first_rank:
-                self._prefetch_kvcache(req)
+            self._prefetch_kvcache(req)
             self.disagg_prefill_bootstrap_queue.add(
                 req, self.model_config.num_key_value_heads
             )
