@@ -1401,6 +1401,41 @@ class HiRadixCache(RadixCache):
                 return True
         return False
 
+    def get_pending_pp_write_backup_event_debug_for_req(
+        self, req, limit: int = 4
+    ) -> dict[str, object]:
+        if not self._pp_write_backup_replay_enabled():
+            return {
+                "enabled": False,
+                "pending_count": 0,
+                "matched_count": 0,
+                "pending_head_seqs": [],
+                "matched_seqs": [],
+            }
+
+        pending_count = 0
+        matched_count = 0
+        pending_head_seqs = []
+        matched_seqs = []
+        for event in self.pp_pending_host_tree_events:
+            if event.kind != "WRITE_BACKUP_COMMITTED":
+                break
+            pending_count += 1
+            if len(pending_head_seqs) < limit:
+                pending_head_seqs.append(event.seq)
+            if self._write_backup_event_affects_req(event, req):
+                matched_count += 1
+                if len(matched_seqs) < limit:
+                    matched_seqs.append(event.seq)
+
+        return {
+            "enabled": True,
+            "pending_count": pending_count,
+            "matched_count": matched_count,
+            "pending_head_seqs": pending_head_seqs,
+            "matched_seqs": matched_seqs,
+        }
+
     def consume_pp_retry_prefetch_req(self, req_id: str) -> bool:
         if req_id not in self.pp_retry_prefetch_req_ids:
             return False

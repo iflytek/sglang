@@ -330,6 +330,28 @@ class SchedulerPPMixin:
             " ".join(parts),
         )
 
+    def _pp_prefill_problem_log_always(
+        self: Scheduler, tag: str, key: Tuple[object, ...], **kwargs
+    ) -> None:
+        state = getattr(self, "_pp_prefill_problem_state", None)
+        if state is None:
+            state = {}
+            setattr(self, "_pp_prefill_problem_state", state)
+        full_key = ("always", tag) + tuple(key)
+        count = state.get(full_key, 0) + 1
+        state[full_key] = count
+        if count not in (1, 8, 64, 256):
+            return
+        parts = [f"{k}={v}" for k, v in kwargs.items()]
+        logger.warning(
+            "[PPPrefillProblem][%s] pp=%s cp=%s tp=%s %s",
+            tag,
+            self.pp_rank,
+            self.attn_cp_rank,
+            self.attn_tp_rank,
+            " ".join(parts),
+        )
+
     def _pp_prefill_intermediate_head_count(
         self: Scheduler, rid: str
     ) -> int:

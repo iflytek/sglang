@@ -2605,8 +2605,15 @@ class Scheduler(
             if hasattr(self.tree_cache, "peek_pp_locally_revoked_req"):
                 follow_rank_revoked_head = self.tree_cache.peek_pp_locally_revoked_req()
 
+        head_empty_issue = None
         for req in self.waiting_queue:
             if follow_rank_revoked_rids and req.rid in follow_rank_revoked_rids:
+                if len(adder.can_run_list) == 0:
+                    head_empty_issue = {
+                        "rid": req.rid,
+                        "stop": "locally_revoked",
+                        "revoked_head": follow_rank_revoked_head,
+                    }
                 if frontier_diag:
                     logger.warning(
                         "[PPFrontierDiag][locally_revoked_barrier] pp=%s cp=%s tp=%s revoked_head=%s revoked=%s waiting=%s bootstrap=%s reason=revoked_rid rid=%s",
@@ -2696,6 +2703,12 @@ class Scheduler(
                     )
                 if not prefetch_done:
                     # skip staging requests that are ongoing prefetch
+                    if len(adder.can_run_list) == 0:
+                        head_empty_issue = {
+                            "rid": req.rid,
+                            "stop": "prefetch",
+                            "prefetch_done": prefetch_done,
+                        }
                     if hasattr(self, "_record_prefill_pick_reason"):
                         self._record_prefill_pick_reason("prefetch_break")
                     break
@@ -2711,6 +2724,35 @@ class Scheduler(
                 and hasattr(self.tree_cache, "has_pending_pp_write_backup_event_for_req")
                 and self.tree_cache.has_pending_pp_write_backup_event_for_req(req)
             ):
+                if len(adder.can_run_list) == 0:
+                    wb_debug = {}
+                    if hasattr(
+                        self.tree_cache,
+                        "get_pending_pp_write_backup_event_debug_for_req",
+                    ):
+                        wb_debug = (
+                            self.tree_cache.get_pending_pp_write_backup_event_debug_for_req(
+                                req
+                            )
+                        )
+                    head_empty_issue = {
+                        "rid": req.rid,
+                        "stop": "write_backup",
+                        "last_device": (
+                            req.last_node.id if req.last_node is not None else None
+                        ),
+                        "last_host": (
+                            req.last_host_node.id
+                            if req.last_host_node is not None
+                            else None
+                        ),
+                        "wb_pending_count": wb_debug.get("pending_count"),
+                        "wb_matched_count": wb_debug.get("matched_count"),
+                        "wb_pending_head_seqs": wb_debug.get(
+                            "pending_head_seqs", []
+                        ),
+                        "wb_matched_seqs": wb_debug.get("matched_seqs", []),
+                    }
                 self._hicache_write_backup_barrier_hits = (
                     getattr(self, "_hicache_write_backup_barrier_hits", 0) + 1
                 )
@@ -2785,6 +2827,29 @@ class Scheduler(
                 running_loras.add(req.lora_id)
 
             if res != AddReqResult.CONTINUE:
+                if len(adder.can_run_list) == 0:
+                    head_empty_issue = {
+                        "rid": req.rid,
+                        "stop": "adder",
+                        "adder_result": getattr(res, "name", str(res)),
+                        "adder_other_reason": getattr(
+                            adder, "last_add_req_other_reason", None
+                        ),
+                        "rem_total_tokens": int(adder.rem_total_tokens),
+                        "rem_chunk_tokens": adder.rem_chunk_tokens,
+                        "extend_input_len": req.extend_input_len,
+                        "prefix_len": len(req.prefix_indices),
+                        "host_hit": req.host_hit_length,
+                        "storage_hit": req.storage_hit_length,
+                        "last_device": (
+                            req.last_node.id if req.last_node is not None else None
+                        ),
+                        "last_host": (
+                            req.last_host_node.id
+                            if req.last_host_node is not None
+                            else None
+                        ),
+                    }
                 if res == AddReqResult.NO_TOKEN:
                     if self.enable_hierarchical_cache:
                         # Set batch_is_full after making sure there are requests that can be served
@@ -2816,6 +2881,21 @@ class Scheduler(
         if len(can_run_list) == 0:
             if hasattr(self, "_record_prefill_pick_reason"):
                 self._record_prefill_pick_reason("empty_result")
+            if self.waiting_queue and head_empty_issue is not None:
+                self._pp_prefill_problem_log_always(
+                    "head_empty_pick",
+                    key=(
+                        head_empty_issue.get("rid"),
+                        head_empty_issue.get("stop"),
+                        head_empty_issue.get("adder_result"),
+                        head_empty_issue.get("adder_other_reason"),
+                        tuple(head_empty_issue.get("wb_matched_seqs", [])),
+                    ),
+                    waiting_head=[x.rid for x in self.waiting_queue[:4]],
+                    chunked_req=getattr(self.chunked_req, "rid", None),
+                    running=[x.rid for x in self.running_batch.reqs[:4]],
+                    **head_empty_issue,
+                )
             return None
 
         if frontier_diag and (can_run_list or adder.preempt_list):
