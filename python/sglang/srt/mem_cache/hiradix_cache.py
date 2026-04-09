@@ -2059,18 +2059,37 @@ class HiRadixCache(RadixCache):
             return False
         if req_id not in self.ongoing_prefetch:
             if event.loaded_from_storage > 0:
+                loaded_tokens_before = self.prefetch_loaded_tokens_by_reqid.get(
+                    req_id, 0
+                )
                 self.zero_hit_prefetch_req_ids.discard(req_id)
                 self.discard_pp_locally_revoked_req(req_id)
-                self.pp_retry_prefetch_req_ids.add(req_id)
-                if self._hicache_verbose_enabled():
-                    logger.warning(
-                        "[HiCachePPEvent][replay_mark_retry_prefetch] pp=%s cp=%s seq=%s rid=%s loaded=%s",
-                        self.pp_rank,
-                        self.attn_cp_rank,
-                        event.seq,
-                        req_id,
-                        event.loaded_from_storage,
-                    )
+                if loaded_tokens_before > 0:
+                    # The follow rank already finished a local prefetch for this
+                    # request and has the loaded tokens buffered for the next
+                    # pick. A delayed upstream finalize should not force the
+                    # same waiting-admission epoch to issue another prefetch.
+                    if self._hicache_verbose_enabled():
+                        logger.warning(
+                            "[HiCachePPEvent][replay_skip_retry_prefetch] pp=%s cp=%s seq=%s rid=%s loaded=%s local_loaded=%s",
+                            self.pp_rank,
+                            self.attn_cp_rank,
+                            event.seq,
+                            req_id,
+                            event.loaded_from_storage,
+                            loaded_tokens_before,
+                        )
+                else:
+                    self.pp_retry_prefetch_req_ids.add(req_id)
+                    if self._hicache_verbose_enabled():
+                        logger.warning(
+                            "[HiCachePPEvent][replay_mark_retry_prefetch] pp=%s cp=%s seq=%s rid=%s loaded=%s",
+                            self.pp_rank,
+                            self.attn_cp_rank,
+                            event.seq,
+                            req_id,
+                            event.loaded_from_storage,
+                        )
             if self._hicache_verbose_enabled():
                 logger.warning(
                     "[HiCachePPEvent][replay_drop_stale_finalize] pp=%s cp=%s seq=%s rid=%s loaded=%s zero_hit=%s",
