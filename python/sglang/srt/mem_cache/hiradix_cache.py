@@ -413,6 +413,8 @@ class HiRadixCache(RadixCache):
         self.pp_authoritative_revoked_req_ids: set[str] = set()
         self.pp_soft_skipped_req_ids: set[str] = set()
         self.pp_staged_prefetch_skip_req_ids: set[str] = set()
+        self.pp_prefetch_unsettled_rids: Dict[str, int] = {}
+        self._pp_consume_seq: int = 0
         self._in_pp_host_tree_replay = False
         self._match_perf_calls = 0
         self._match_perf_total_ms = 0.0
@@ -1141,6 +1143,8 @@ class HiRadixCache(RadixCache):
         self.pp_authoritative_revoked_req_ids.clear()
         self.pp_soft_skipped_req_ids.clear()
         self.pp_staged_prefetch_skip_req_ids.clear()
+        self.pp_prefetch_unsettled_rids.clear()
+        self._pp_consume_seq = 0
         self._tree_counter_last_snapshot = 0
         self._tree_alloc_match_split = 0
         self._tree_alloc_insert_split = 0
@@ -1212,6 +1216,7 @@ class HiRadixCache(RadixCache):
         return self.pp_host_tree_event_seq
 
     def consume_pp_host_tree_events(self) -> Any:
+        self._pp_consume_seq += 1
         events = self.pp_outgoing_host_tree_events
         self.pp_outgoing_host_tree_events = []
         if not events:
@@ -1424,6 +1429,31 @@ class HiRadixCache(RadixCache):
                     return True
         return False
 
+    # Number of consume_pp_host_tree_events() rounds to wait after emitting
+    # PREFETCH_FINALIZE before allowing PP0 to pick the request.  This gives
+    # PP1 enough time to receive the event, start its own L3 prefetch, and
+    # complete it so that match_prefix returns the same result on both ranks.
+    # Each round ≈ one PP loop iteration.  The value must cover:
+    #   1 round  – event delivery to PP1
+    #   2-3 rounds – PP1 L3 load time (empirically 1-3 seconds)
+    #   1 round  – PP1 batch pick with settled prefix
+    _PP_PREFETCH_SETTLE_ROUNDS = int(
+        os.getenv("SGLANG_PP_PREFETCH_SETTLE_ROUNDS", "5")
+    )
+
+    def has_unsettled_pp_prefetch_for_req(self, req_rid: str) -> bool:
+        """PP0 side: check if this rid has a completed prefetch that PP1
+        hasn't had enough rounds to also complete."""
+        if self.pp_rank != 0 or self.pp_size <= 1:
+            return False
+        emit_seq = self.pp_prefetch_unsettled_rids.get(req_rid)
+        if emit_seq is None:
+            return False
+        if self._pp_consume_seq - emit_seq >= self._PP_PREFETCH_SETTLE_ROUNDS:
+            del self.pp_prefetch_unsettled_rids[req_rid]
+            return False
+        return True
+
     def has_pending_pp_write_backup_event_for_req(self, req) -> bool:
         if not self._pp_write_backup_replay_enabled():
             return False
@@ -1572,6 +1602,7 @@ class HiRadixCache(RadixCache):
         self.pp_authoritative_revoked_req_ids.discard(req_id)
         self.pp_soft_skipped_req_ids.discard(req_id)
         self.pp_staged_prefetch_skip_req_ids.discard(req_id)
+        self.pp_prefetch_unsettled_rids.pop(req_id, None)
         self.clear_follow_rank_prefetch_issue_pending(req_id)
         self.discard_pp_locally_revoked_req(req_id)
         self._purge_matching_local_revoke_residue(req_id)
@@ -2084,6 +2115,8 @@ class HiRadixCache(RadixCache):
                     loaded_from_storage=loaded_from_storage,
                 )
             )
+            if self.pp_size > 1 and self.pp_rank == 0:
+                self.pp_prefetch_unsettled_rids[req_id] = self._pp_consume_seq
         if self.enable_storage_metrics:
             self.storage_metrics_collector.log_prefetched_tokens(loaded_from_storage)
         return loaded_from_storage

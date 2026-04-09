@@ -2736,6 +2736,27 @@ class Scheduler(
                     self._record_prefill_pick_reason("prefetch_settle_outgoing_break")
                 break
 
+            # PP0: barrier if a PREFETCH_FINALIZE was emitted recently but
+            # PP1 hasn't had enough PP rounds to complete its own L3
+            # prefetch.  Without this, PP0's match_prefix sees a boosted
+            # prefix (e.g. 384) while PP1 still sees the base prefix (64),
+            # causing PrefillAdder to accept different request sets.
+            if (
+                self.enable_hicache_storage
+                and self.pp_group is not None
+                and self.pp_group.is_first_rank
+                and hasattr(self.tree_cache, "has_unsettled_pp_prefetch_for_req")
+                and self.tree_cache.has_unsettled_pp_prefetch_for_req(req.rid)
+            ):
+                if len(adder.can_run_list) == 0:
+                    head_empty_issue = {
+                        "rid": req.rid,
+                        "stop": "prefetch_unsettled",
+                    }
+                if hasattr(self, "_record_prefill_pick_reason"):
+                    self._record_prefill_pick_reason("prefetch_unsettled_break")
+                break
+
             req.init_next_round_input(self.tree_cache)
             _wb_barrier = False
             if self.pp_group is not None and self.enable_hicache_storage:
