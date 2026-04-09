@@ -1345,30 +1345,36 @@ class HiRadixCache(RadixCache):
         event = self._peek_pp_host_tree_event()
         return event is not None and event.kind == "WRITE_BACKUP_COMMITTED"
 
-    def _collect_node_path_meta(
-        self, last_node: Optional[TreeNode]
+    def _collect_node_boundary_meta(
+        self, node: Optional[TreeNode]
     ) -> set[tuple[int, Optional[str], Optional[str]]]:
-        path_meta: set[tuple[int, Optional[str], Optional[str]]] = set()
-        walk_node = last_node
-        while walk_node is not None and walk_node is not self.root_node:
-            path_meta.add(
-                (
-                    len(walk_node.key) if walk_node.key is not None else 0,
-                    walk_node.get_last_hash_value(),
-                    walk_node.key.extra_key if walk_node.key is not None else None,
-                )
+        if node is None or node is self.root_node:
+            return set()
+        return {
+            (
+                len(node.key) if node.key is not None else 0,
+                node.get_last_hash_value(),
+                node.key.extra_key if node.key is not None else None,
             )
-            walk_node = walk_node.parent
-        return path_meta
+        }
+
+    def _collect_visible_write_backup_req_meta(
+        self, req
+    ) -> set[tuple[int, Optional[str], Optional[str]]]:
+        host_hit_length = int(getattr(req, "host_hit_length", 0) or 0)
+        if host_hit_length > 0:
+            visible_node = getattr(req, "last_host_node", None)
+            if visible_node is None:
+                visible_node = getattr(req, "last_node", None)
+        else:
+            visible_node = getattr(req, "last_node", None)
+        return self._collect_node_boundary_meta(visible_node)
 
     def _write_backup_event_affects_req(self, event: PPHostTreeEvent, req) -> bool:
         if event.kind != "WRITE_BACKUP_COMMITTED":
             return False
 
-        path_meta = self._collect_node_path_meta(getattr(req, "last_node", None))
-        path_meta.update(
-            self._collect_node_path_meta(getattr(req, "last_host_node", None))
-        )
+        path_meta = self._collect_visible_write_backup_req_meta(req)
         if not path_meta:
             return False
 
