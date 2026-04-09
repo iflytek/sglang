@@ -1491,9 +1491,6 @@ class Scheduler(
             else:
                 recv_reqs = None
 
-        if self.input_blocker is not None:
-            recv_reqs = self.input_blocker.handle(recv_reqs)
-
         if self.pp_rank > 0:
             if (
                 self.attn_tp_rank == 0
@@ -1505,6 +1502,9 @@ class Scheduler(
                     )
                 else:
                     pp_hicache_host_tree_events = []
+
+        if self.input_blocker is not None:
+            recv_reqs = self.input_blocker.handle(recv_reqs)
 
         if self.server_args.enable_dp_attention:
             if self.attn_tp_rank == 0 and self.attn_cp_rank == 0:
@@ -2618,10 +2618,10 @@ class Scheduler(
                 follow_rank_revoked_head = self.tree_cache.peek_pp_locally_revoked_req()
 
         for req in self.waiting_queue:
-            if follow_rank_revoked_head is not None and req.rid == follow_rank_revoked_head:
+            if follow_rank_revoked_rids and req.rid in follow_rank_revoked_rids:
                 if frontier_diag:
                     logger.warning(
-                        "[PPFrontierDiag][locally_revoked_barrier] pp=%s cp=%s tp=%s revoked_head=%s revoked=%s waiting=%s bootstrap=%s reason=waiting_head rid=%s",
+                        "[PPFrontierDiag][locally_revoked_barrier] pp=%s cp=%s tp=%s revoked_head=%s revoked=%s waiting=%s bootstrap=%s reason=revoked_rid rid=%s",
                         self.pp_rank,
                         self.attn_cp_rank,
                         self.attn_tp_rank,
