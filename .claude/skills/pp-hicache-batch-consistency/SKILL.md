@@ -111,6 +111,34 @@ if (
     break  # wait until event is delivered to PP1
 ```
 
+### Root Cause 4: L3 Prefetch Completion Timing Divergence
+
+**Problem**: PP0 completes an L3 prefetch for a request (e.g., `9ec`) while it's still in bootstrap queue. The PREFETCH_FINALIZE event is emitted and delivered to PP1. However, PP1's own L3 prefetch for the same request hasn't even started (the request was in bootstrap on PP1). By the time both ranks release the request from bootstrap via consensus, PP0's `match_prefix` returns prefix=384 (64 device + 320 L3), while PP1's returns prefix=64 (no L3 data yet).
+
+This causes `PrefillAdder` on PP0 to compute `new_tokens=45` for the request (accepted) while PP1 computes `new_tokens=365` (rejected due to token budget), resulting in different batch sizes (PP0: 6 reqs, PP1: 4 reqs) → shape crash in the forward pass.
+
+**Key insight**: The PREFETCH_FINALIZE event only syncs host tree metadata, not actual KV data. PP1 receiving the event creates metadata nodes but doesn't load KV data from L3. PP1 must independently complete its own L3 prefetch to converge.
+
+**Why Root Cause 3 fix was insufficient**: The `has_outgoing_pp_prefetch_settle_event_for_req` barrier only checks the outgoing queue. By the time PP0 picks the request (seconds later), the event has already been consumed and sent. The barrier returns false.
+
+**Fix** (commit `f5ff097`): Watermark-based barrier. PP0 tracks the `_pp_consume_seq` (incremented each `consume_pp_host_tree_events()` call). When PREFETCH_FINALIZE is emitted, the rid and current seq are recorded in `pp_prefetch_unsettled_rids`. `has_unsettled_pp_prefetch_for_req()` barriers PP0 from picking the request until `N` consume rounds have passed (default 5, configurable via `SGLANG_PP_PREFETCH_SETTLE_ROUNDS`), giving PP1 time to complete its own L3 load.
+
+```python
+# In hiradix_cache.py
+_PP_PREFETCH_SETTLE_ROUNDS = int(os.getenv("SGLANG_PP_PREFETCH_SETTLE_ROUNDS", "5"))
+
+def has_unsettled_pp_prefetch_for_req(self, req_rid):
+    emit_seq = self.pp_prefetch_unsettled_rids.get(req_rid)
+    if emit_seq is None:
+        return False
+    if self._pp_consume_seq - emit_seq >= self._PP_PREFETCH_SETTLE_ROUNDS:
+        del self.pp_prefetch_unsettled_rids[req_rid]
+        return False
+    return True
+```
+
+**Zero transport changes** — purely local state on PP0. No impact on startup, warmup, non-PP, or non-storage modes.
+
 ## Debug Methodology
 
 ### Key Log Patterns
