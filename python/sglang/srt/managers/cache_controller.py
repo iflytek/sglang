@@ -979,6 +979,40 @@ class HiCacheController:
                     storage_hit_count,
                     len(hash_value),
                 )
+
+                # PP follow rank: if L3 hits are low, the data may still be
+                # in flight from a previous write-back.  PP0 completes its
+                # forward pass (and thus its device→host→L3 pipeline) earlier
+                # than PP1, so the same prefix may already be visible in L3
+                # from PP0's perspective but not from PP1's.  Instead of
+                # blind retries, wait for the local backup pipeline to drain
+                # (backup_queue empty = nothing pending, ack_backup_queue
+                # empty = nothing just-finished-but-unacked), then re-query.
+                if (
+                    self.pp_size > 1
+                    and self.pp_rank > 0
+                    and storage_hit_count < len(operation.token_ids)
+                    and storage_hit_count < self.prefetch_threshold
+                ):
+                    deadline = time.monotonic() + 2.0
+                    while time.monotonic() < deadline:
+                        if (
+                            self.backup_queue.empty()
+                            and self.ack_backup_queue.empty()
+                        ):
+                            break
+                        time.sleep(0.05)
+                    hash_value, storage_hit_count = self._storage_hit_query(
+                        operation
+                    )
+                    logger.warning(
+                        "[HiCachePrefetchThread][wait_backup] rid=%s storage_hit_count=%s hash_pages=%s waited=%.3fs",
+                        operation.request_id,
+                        storage_hit_count,
+                        len(hash_value),
+                        time.monotonic() - (deadline - 2.0),
+                    )
+
                 storage_hit_count_tensor = torch.tensor(
                     storage_hit_count, dtype=torch.int
                 )
